@@ -15,43 +15,52 @@ $error = '';
 $setUp = is_set_up();
 
 if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
-    $action = (string)($_POST['action'] ?? '');
-    if (!check_csrf($_POST['csrf'] ?? null)) {
-        $error = 'Your form expired. Please try again.';
-    } elseif ($action === 'logout') {
-        log_out();
+    $action = post_string('action');
+    if ($action === 'logout') {
+        if (check_csrf($_POST['csrf'] ?? null)) {
+            log_out();
+        }
         redirect_self();
-    } elseif (($wait = lockout_seconds()) > 0) {
-        $error = lockout_message($wait);
-    } elseif ($action === 'setup' && !$setUp) {
-        $code = strtoupper((string)preg_replace('/\s+/', '', (string)($_POST['code'] ?? '')));
-        $password = (string)($_POST['password'] ?? '');
-        if (!hash_equals(setup_code(), $code)) {
-            record_failure();
-            $error = 'That setup code doesn’t match. Copy it again from setup-code.txt.';
-        } elseif (mb_strlen($password) < MIN_PASSWORD_LENGTH) {
-            $error = 'Use at least ' . MIN_PASSWORD_LENGTH . ' characters for your password.';
-        } elseif ($password !== (string)($_POST['confirm'] ?? '')) {
-            $error = 'The two passwords don’t match.';
+    } elseif (!check_form_token($_POST['csrf'] ?? null)) {
+        $error = 'Your form expired. Please try again.';
+    } elseif (($action === 'setup' && !$setUp) || ($action === 'login' && $setUp)) {
+        if (($wait = begin_attempt('admin')) > 0) {
+            $error = lockout_message($wait);
+        } elseif ($action === 'setup') {
+            $code = strtoupper((string)preg_replace('/\s+/', '', post_string('code')));
+            $password = post_string('password');
+            if (!hash_equals(setup_code(), $code)) {
+                $error = 'That setup code doesn’t match. Copy it again from setup-code.txt.';
+            } elseif (($problem = password_problem($password, MIN_PASSWORD_LENGTH)) !== '') {
+                $error = $problem;
+            } elseif ($password !== post_string('confirm')) {
+                $error = 'The two passwords don’t match.';
+            } else {
+                set_password($password);
+                @unlink(setup_code_file());
+                clear_attempts('admin');
+                log_in();
+                redirect_self();
+            }
+        } elseif (verify_password(post_string('password'))) {
+            clear_attempts('admin');
+            log_in();
+            redirect_self();
         } else {
-            set_password($password);
-            @unlink(setup_code_file());
-            log_in();
-            redirect_self();
+            $error = 'That password is wrong.';
         }
-    } elseif ($action === 'login' && $setUp) {
-        if (verify_password((string)($_POST['password'] ?? ''))) {
-            log_in();
-            redirect_self();
-        }
-        record_failure();
-        $error = 'That password is wrong.';
     }
+}
+
+function post_string(string $key): string
+{
+    $value = $_POST[$key] ?? '';
+    return is_string($value) ? $value : '';
 }
 
 function redirect_self(): void
 {
-    header('Location: ' . strtok($_SERVER['REQUEST_URI'] ?? './', '?'), true, 303);
+    header('Location: ./', true, 303);
     exit;
 }
 
@@ -63,6 +72,7 @@ $settings = load_data()['settings'];
 if ($view === 'app') {
     grant_view_access($settings); // a private site stays open to its owner
 }
+$formToken = $view === 'app' ? '' : form_token(); // sets a cookie, so before any output
 ?><!doctype html>
 <html lang="en">
 <head>
@@ -75,7 +85,7 @@ if ($view === 'app') {
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Control Room">
-  <meta name="csrf-token" content="<?= h(csrf_token()) ?>">
+  <?php if ($view === 'app'): ?><meta name="csrf-token" content="<?= h(csrf_token()) ?>"><?php endif; ?>
   <title>Control Room · <?= h($settings['title']) ?></title>
   <link rel="icon" href="../assets/img/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="../assets/img/apple-touch-icon.png">
@@ -91,7 +101,7 @@ if ($view === 'app') {
     <form class="gate-card" method="post" autocomplete="on">
       <p class="eyebrow"><?= h($settings['title']) ?></p>
       <h1>Control <em>Room</em></h1>
-      <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
+      <input type="hidden" name="csrf" value="<?= h($formToken) ?>">
       <?php if ($error): ?><p class="msg error" role="alert"><?= h($error) ?></p><?php endif; ?>
       <?php if ($view === 'setup'): ?>
         <input type="hidden" name="action" value="setup">

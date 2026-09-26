@@ -15,6 +15,7 @@ putenv('FINDOM_PRIVATE_DIR=' . $tmp);
 require __DIR__ . '/../lib/store.php';
 require __DIR__ . '/../lib/auth.php';
 require __DIR__ . '/../lib/import.php';
+require __DIR__ . '/../lib/images.php';
 
 $failures = 0;
 $count = 0;
@@ -64,6 +65,21 @@ check('ip: mapped v6', is_public_ip('::ffff:127.0.0.1'), false);
 check('ip: v6 loopback', is_public_ip('::1'), false);
 check('ip: v6 ula', is_public_ip('fd00::1'), false);
 check('ip: public', is_public_ip('93.184.216.34'), true);
+check('ip: test-net', is_public_ip('198.51.100.7'), false);
+check('ip: v6 compat loopback', is_public_ip('::7f00:1'), false);
+check('ip: v6 documentation', is_public_ip('2001:db8::1'), false);
+check('ip: v6 6to4 wrapping 127.0.0.1', is_public_ip('2002:7f00:1::1'), false);
+check('ip: v6 teredo', is_public_ip('2001::1'), false);
+check('ip: v6 nat64', is_public_ip('64:ff9b::7f00:1'), false);
+check('ip: v6 link-local', is_public_ip('fe80::1'), false);
+check('ip: v6 global', is_public_ip('2606:4700:4700::1111'), true);
+$_SERVER['REMOTE_ADDR'] = '2a01:4f8:1:2:aaaa::1';
+$v6a = client_key();
+$_SERVER['REMOTE_ADDR'] = '2a01:4f8:1:2:bbbb::9';
+check('rate limit: one IPv6 /64 is one visitor', client_key(), $v6a);
+$_SERVER['REMOTE_ADDR'] = '203.0.113.9';
+check('rate limit: IPv4 as is', client_key(), '203.0.113.9');
+unset($_SERVER['REMOTE_ADDR']);
 check('host: localhost refused', public_ip_for('localhost'), null);
 check('host: literal private refused', public_ip_for('10.0.0.5'), null);
 try {
@@ -71,6 +87,12 @@ try {
     check('fetch: loopback refused', 'fetched', 'refused');
 } catch (RuntimeException $e) {
     check('fetch: loopback refused', 'refused', 'refused');
+}
+try {
+    safe_request('http://[::1]/', 1000, '*/*');
+    check('fetch: v6 loopback refused', 'fetched', 'refused');
+} catch (RuntimeException $e) {
+    check('fetch: v6 loopback refused', 'refused', 'refused');
 }
 try {
     safe_request('file:///etc/passwd', 1000, '*/*');
@@ -107,6 +129,18 @@ check('import lines: inline', [$lines[0]['brand'], $lines[0]['name'], $lines[0][
 check('import lines: bare number', [$lines[1]['name'], $lines[1]['price'], $lines[1]['url']], ['Cute hat', 120.0, 'https://shop.com/hat']);
 check('import lines: bare link named from slug', [$lines[2]['brand'], $lines[2]['name'], $lines[2]['url']], ['AMIRI', '1994 Tank Black', 'https://amiri.com/products/amiri-1994-tank-black']);
 check('import lines: name only', [$lines[3]['name'], $lines[3]['price']], ['Just a name with no price', null]);
+
+check('trim: separators only', trim_separators(' — Chloé bag –, '), 'Chloé bag');
+check('trim: keeps multibyte ends', [trim_separators('Café À'), trim_separators('“Quoted” ·')], ['Café À', '“Quoted”']);
+$mb = parse_wishlist_text("Chloé Woody tote — 890 € — https://shop.com/tote\n€uro Café À – 12 €");
+check('import lines: multibyte separators', [$mb[0]['brand'], $mb[0]['name'], $mb[0]['price'], $mb[0]['currency']], ['Chloé', 'Woody tote', 890.0, 'EUR']);
+check('import lines: multibyte name intact', $mb[1]['name'], '€uro Café À');
+check('brand: two words', split_brand('Bottega Veneta Andiamo bag'), ['Bottega Veneta', 'Andiamo bag']);
+check('brand: needs a word break', split_brand('Diorama lamp'), ['', 'Diorama lamp']);
+check('brand: apostrophe normalized', split_brand("L'Objet ashtray"), ['L’Objet', 'ashtray']);
+check('brand: from the wishlist', split_brand('Maison Nobody vase', ['Maison Nobody']), ['Maison Nobody', 'vase']);
+check('name: shop suffix removed', tidy_product_name('Medusa bag | FARFETCH', 'Versace', 'Farfetch'), 'Medusa bag');
+check('name: never emptied', tidy_product_name('AMIRI', 'AMIRI', 'AMIRI'), 'AMIRI');
 
 $rows = parse_wishlist_text("Silk scarf\t$1,229\thttps://example.com/scarf\tChrome Hearts");
 check('import rows: tab separated', [$rows[0]['name'], $rows[0]['price'], $rows[0]['currency'], $rows[0]['url'], $rows[0]['brand']], ['Silk scarf', 1229.0, 'USD', 'https://example.com/scarf', 'Chrome Hearts']);
@@ -173,6 +207,11 @@ $public = public_state($data);
 check('hidden: balance', $public['stats']['balance'], null);
 check('hidden: price', $public['items'][0]['price'], null);
 check('hidden: progress kept', is_float($public['items'][0]['progress']), true);
+$bucketed = array_filter($public['items'], function ($i) {
+    return $i['status'] === 'wishing' && abs($i['progress'] * 10 - round($i['progress'] * 10)) > 1e-9;
+});
+check('hidden: progress only in tenths', count($bucketed), 0);
+check('hidden: hours to go', $public['items'][0]['hoursToGo'], null);
 check('private without passcode falls back to public', normalize_settings(['visibility' => 'private'])['visibility'], 'public');
 check('copy: empty falls back', normalize_settings(['copy' => ['heroIntro' => '   ']])['copy']['heroIntro'], default_settings()['copy']['heroIntro']);
 
@@ -186,6 +225,50 @@ check('item: control chars stripped', $evil['name'], '<script>x</script> Bag');
 check('entry: bad date dropped', normalize_entry(['type' => 'task', 'amount' => 5, 'at' => 'yesterday-ish']), null);
 check('entry: unknown type dropped', normalize_entry(['type' => 'bribe', 'amount' => 5, 'at' => iso_now()]), null);
 
+/* ───── damaged data file ───── */
+$good = (string)file_get_contents(data_file());
+save_data(load_data()); // leaves a data.json.bak
+file_put_contents(data_file(), '{"items": [trunc');
+$logTo = ini_set('error_log', $tmp . '/php-errors.log'); // the fallback logs a warning; keep it out of the output
+check('data: damaged file falls back to the backup', count(load_data()['items']), 12);
+ini_set('error_log', (string)$logTo);
+check('data: damaged file left for inspection', file_get_contents(data_file()), '{"items": [trunc');
+file_put_contents(data_file(), $good);
+
+/* ───── photos ───── */
+$png = function (int $w, int $h): string {
+    $img = imagecreatetruecolor($w, $h);
+    imagefill($img, 0, 0, imagecolorallocate($img, 200, 30, 90));
+    $file = tempnam(sys_get_temp_dir(), 'findom-img');
+    imagepng($img, $file);
+    return $file;
+};
+$photoError = function (string $file, int $maxPixels = IMAGE_MAX_PIXELS): string {
+    try {
+        $stored = store_item_image($file, 'i_test', $maxPixels);
+        delete_item_image($stored);
+        return 'stored';
+    } catch (RuntimeException $e) {
+        return 'refused';
+    }
+};
+$ok = $png(64, 48);
+$stored = store_item_image($ok, 'i_test');
+check('photo: re-encoded', (bool)preg_match('#^uploads/items/i-test-[a-f0-9]{8}\.(webp|jpg)$#', $stored), true);
+check('photo: saved', is_file(uploads_dir() . '/' . substr($stored, strlen('uploads/'))), true);
+delete_item_image($stored);
+check('photo: deleted', is_file(uploads_dir() . '/' . substr($stored, strlen('uploads/'))), false);
+check('photo: over the pixel cap', $photoError($ok, 1000), 'refused');
+$tiny = $png(8, 8);
+check('photo: too small', $photoError($tiny), 'refused');
+$broken = $png(64, 48);
+file_put_contents($broken, substr((string)file_get_contents($broken), 0, 40)); // header only: looks like a PNG, won't decode
+check('photo: undecodable refused', $photoError($broken), 'refused');
+$text = tempnam(sys_get_temp_dir(), 'findom-img');
+file_put_contents($text, '<?php echo "hi";');
+check('photo: not an image', $photoError($text), 'refused');
+array_map('unlink', [$ok, $tiny, $broken, $text]);
+
 /* ───── viewer passcode token ───── */
 $hash = password_hash('open sesame', PASSWORD_DEFAULT);
 $token = view_token($hash, time() + 60);
@@ -196,8 +279,10 @@ $_COOKIE[VIEW_COOKIE] = view_token($hash, time() - 5);
 check('view: expired token', has_view_access(['visibility' => 'private', 'passcodeHash' => $hash]), false);
 
 /* ───── clean up ───── */
-array_map('unlink', array_filter((array)glob($tmp . '/{,.}*', GLOB_BRACE), 'is_file'));
-@rmdir($tmp);
+foreach (['/sessions', ''] as $sub) {
+    array_map('unlink', array_filter((array)glob($tmp . $sub . '/{,.}*', GLOB_BRACE), 'is_file'));
+    @rmdir($tmp . $sub);
+}
 
 echo ($failures ? "\n$failures of $count checks failed.\n" : "All $count checks passed.\n");
 exit($failures ? 1 : 0);

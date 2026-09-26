@@ -23,16 +23,23 @@ const server = spawn('php', ['-S', `127.0.0.1:${port}`, 'tools/router.php'], { c
 const BASE = `http://127.0.0.1:${port}`;
 for (let i = 0; i < 50; i++) { try { await fetch(BASE + '/api/state.php'); break; } catch { await new Promise((r) => setTimeout(r, 100)); } }
 process.on('exit', () => { server.kill(); fs.rmSync(PRIV, { recursive: true, force: true }); });
-let cookie = '';
+const main = { cookie: '' }; // the owner's browser; other "browsers" get their own jar
 let csrf = '';
 const log = (...a) => console.log(...a);
-async function req(path, opts = {}) {
-  const res = await fetch(BASE + path, { redirect: 'manual', ...opts, headers: { ...(opts.headers || {}), cookie } });
+async function req(path, opts = {}, jar = main) {
+  const res = await fetch(BASE + path, { redirect: 'manual', ...opts, headers: { ...(opts.headers || {}), cookie: jar.cookie } });
   const set = res.headers.getSetCookie?.() || [];
-  for (const c of set) { const kv = c.split(';')[0]; const [k] = kv.split('='); cookie = cookie.split('; ').filter(x => x && !x.startsWith(k + '=')).concat(kv).join('; '); }
+  for (const c of set) {
+    const kv = c.split(';')[0];
+    const [k, v] = kv.split('=');
+    jar.cookie = jar.cookie.split('; ').filter(x => x && !x.startsWith(k + '=')).concat(v ? [kv] : []).join('; ');
+  }
   return res;
 }
-async function page(path) { const r = await req(path); return r.text(); }
+async function page(path, jar = main) { const r = await req(path, {}, jar); return r.text(); }
+const FORM = { 'Content-Type': 'application/x-www-form-urlencoded' };
+const formToken = (html) => (html.match(/name="csrf" value="([a-f0-9]{32})"/) || [])[1] || '';
+async function post(path, fields, jar = main) { return req(path, { method: 'POST', headers: FORM, body: new URLSearchParams(fields) }, jar); }
 async function api(action, body, method = 'POST') {
   const r = await req('/admin/api.php?action=' + action, method === 'GET' ? {} : {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf }, body: JSON.stringify(body || {}),
@@ -44,14 +51,22 @@ async function api(action, body, method = 'POST') {
 let failed = 0;
 function assert(cond, msg) { if (!cond) { failed++; console.error('✗ ' + msg); process.exitCode = 1; } else log('✓ ' + msg); }
 
-let html = await page('/admin/');
-csrf = html.match(/name="csrf-token" content="([^"]+)"/)[1];
+const first = await req('/admin/');
+let html = await first.text();
+assert(!first.headers.getSetCookie().some(c => c.startsWith('findom_admin=')), 'anonymous visit starts no session');
+assert(formToken(html) !== '' && main.cookie.includes('findom_form='), 'setup form carries its CSRF token');
 const code = fs.readFileSync(PRIV + '/setup-code.txt', 'utf8').trim();
-let r = await req('/admin/', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-  body: new URLSearchParams({ csrf, action: 'setup', code, password: 'correct horse battery', confirm: 'correct horse battery' }) });
+const setupFields = { csrf: formToken(html), action: 'setup', code, password: 'correct horse battery', confirm: 'correct horse battery' };
+let r = await post('/admin/', setupFields, { cookie: '' });
+assert(r.status === 200 && (await r.text()).includes('form expired'), 'setup without the form cookie refused');
+r = await post('/admin/', { ...setupFields, password: 'short', confirm: 'short' });
+assert(r.status === 200 && (await r.text()).includes('at least 10'), 'short password refused');
+r = await post('/admin/', setupFields);
 assert(r.status === 303, 'setup redirects');
 html = await page('/admin/');
 assert(html.includes('id="app"'), 'app shell after setup');
+csrf = html.match(/name="csrf-token" content="([^"]+)"/)[1];
+assert(!fs.existsSync(PRIV + '/setup-code.txt'), 'setup code used up');
 let s = await api('state', null, 'GET');
 assert(s.ok && s.state.items.length === 12, 'state has 12 seeded items');
 assert(s.meta && s.meta.curl === true, 'meta reports curl');
@@ -124,9 +139,23 @@ assert(s.ok && s.state.settings.hourlyRate === 40 && s.state.settings.copy.heroK
 s = await api('settings.save', { settings: { visibility: 'private' } });
 assert(!s.ok && s.status === 400, 'private needs a passcode');
 s = await api('settings.save', { settings: { visibility: 'private', passcode: 'kneel' } });
+assert(!s.ok && s.status === 400, 'short passcode refused');
+s = await api('settings.save', { settings: { visibility: 'private', passcode: 'kneel-before-me' } });
 assert(s.ok && s.state.settings.visibility === 'private' && s.state.settings.hasPasscode, 'private with passcode');
 let pr = await fetch(BASE + '/api/state.php');
-assert(pr.status === 401, 'public state locked when private');
+assert(pr.status === 401 && /no-store/.test(pr.headers.get('cache-control')), 'public state locked when private');
+const visitor = { cookie: '' };
+const gate = await req('/', {}, visitor);
+const gateHtml = await gate.text();
+assert(gate.status === 401 && gateHtml.includes('name="passcode"') && !gateHtml.includes('Chrome Hearts'), 'private site shows only the passcode gate');
+r = await post('/', { csrf: formToken(gateHtml), passcode: 'wrong-passcode' }, visitor);
+assert(r.status === 401 && (await r.text()).includes('Wrong'), 'wrong passcode refused');
+r = await post('/', { csrf: 'f'.repeat(32), passcode: 'kneel-before-me' }, visitor);
+assert(r.status === 401 && (await r.text()).includes('expired'), 'passcode form without its token refused');
+r = await post('/', { csrf: formToken(gateHtml), passcode: 'kneel-before-me' }, visitor);
+assert(r.status === 303 && visitor.cookie.includes('findom_view='), 'right passcode lets the visitor in');
+pr = await req('/api/state.php', {}, visitor);
+assert(pr.status === 200 && /private/.test(pr.headers.get('cache-control')), 'visitor cookie opens the state API, privately cached');
 s = await api('settings.save', { settings: { visibility: 'hide-amounts' } });
 const hidden = await (await fetch(BASE + '/api/state.php')).json();
 assert(hidden.state.stats.balance === null && hidden.state.items[0].price === null, 'hide-amounts hides money');
@@ -158,6 +187,14 @@ const bad = await req('/admin/api.php?action=ledger.add', { method: 'POST', head
 assert(bad.status === 403, 'bad CSRF refused');
 const anon = await fetch(BASE + '/admin/api.php?action=state');
 assert(anon.status === 401, 'anonymous state refused');
+const forged = await req('/admin/api.php?action=state', {}, { cookie: 'findom_admin=' + 'a'.repeat(32) });
+assert(forged.status === 401, 'made-up session cookie refused');
+const weird = await req('/admin/api.php?action[]=state');
+assert(weird.status !== 500 && weird.status !== 200, 'array action rejected cleanly (' + weird.status + ')');
+for (const p of ['//lib/store.php', '/lib//auth.php', '/tools/test.php', '/package.json', '/README.md', '/uploads/.htaccess']) {
+  const res = await fetch(BASE + p);
+  assert(res.status === 404 || res.status === 403, 'internal file hidden: ' + p + ' (' + res.status + ')');
+}
 
 // backup round trip
 const exp = await req('/admin/api.php?action=export');
@@ -168,11 +205,31 @@ assert(s.ok && s.items === backup.items.length, 'restore backup');
 s = await api('data.import', { data: { hello: 1 } });
 assert(!s.ok, 'restore rejects junk');
 
-// password change keeps you signed in
+// a second device signs in; a password change signs it out but keeps this one signed in
+const phone = { cookie: '' };
+const loginHtml = await page('/admin/', phone);
+r = await post('/admin/', { csrf: formToken(loginHtml), action: 'login', password: 'correct horse battery' }, phone);
+assert(r.status === 303 && phone.cookie.includes('findom_admin='), 'second device signs in');
+r = await req('/admin/api.php?action=state', {}, phone);
+assert(r.status === 200, 'second device can read state');
 s = await api('password.change', { current: 'correct horse battery', next: 'new password 123' });
 assert(s.ok && s.csrf, 'password change');
 s = await api('ledger.add', { type: 'money', amount: 1, label: 'after pw change' });
 assert(s.ok, 'still signed in after password change');
+r = await req('/admin/api.php?action=state', {}, phone);
+assert(r.status === 401, 'password change signs other devices out');
+
+// sign-in lockout: the seventh wrong password in a row is refused without being checked
+const guesser = { cookie: '' };
+const guessHtml = await page('/admin/', guesser);
+let lockedAt = -1;
+for (let i = 0; i < 8 && lockedAt < 0; i++) {
+  const t = await (await post('/admin/', { csrf: formToken(guessHtml), action: 'login', password: 'guess number ' + i }, guesser)).text();
+  if (t.includes('Too many wrong attempts')) lockedAt = i;
+}
+assert(lockedAt === 6, 'sign-in locks after 6 wrong passwords (locked at ' + lockedAt + ')');
+r = await post('/admin/', { csrf: formToken(guessHtml), action: 'login', password: 'new password 123' }, guesser);
+assert(r.status === 200 && (await r.text()).includes('Too many wrong attempts'), 'even the right password waits out the lockout');
 
 console.log(failed ? `\n${failed} checks failed.` : '\nAll smoke checks passed.');
 process.exit(failed ? 1 : 0);

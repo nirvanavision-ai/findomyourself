@@ -15,11 +15,16 @@ require_once __DIR__ . '/bootstrap.php';
 
 const IMAGE_TYPES = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/webp' => 'webp', 'image/gif' => 'gif', 'image/avif' => 'avif'];
 const IMAGE_MAX_EDGE = 1600;
-const IMAGE_MAX_PIXELS = 50000000;
+const IMAGE_MAX_PIXELS = 30000000;        // uploads (the Control Room already shrinks big photos)
+const IMAGE_MAX_PIXELS_REMOTE = 16000000; // photos downloaded from shops
 const IMAGE_MAX_UPLOAD = 20 * 1024 * 1024;
 
-/** Stores the image at $path for item $itemId and returns its public path ("uploads/items/…"). */
-function store_item_image(string $path, string $itemId): string
+/**
+ * Stores the image at $path for item $itemId and returns its public path ("uploads/items/…").
+ * Only images this server can decode are kept, and they are always re-encoded, so nothing
+ * but plain pixels ever reaches the uploads folder.
+ */
+function store_item_image(string $path, string $itemId, int $maxPixels = IMAGE_MAX_PIXELS): string
 {
     $mime = (new finfo(FILEINFO_MIME_TYPE))->file($path) ?: '';
     if (!isset(IMAGE_TYPES[$mime])) {
@@ -29,43 +34,57 @@ function store_item_image(string $path, string $itemId): string
         throw new RuntimeException('That photo is over 20 MB. Use a smaller one.');
     }
     $size = @getimagesize($path);
-    if ($size && ($size[0] < 16 || $size[1] < 16)) {
+    if (!$size || $size[0] < 1 || $size[1] < 1) {
+        throw new RuntimeException('That image looks damaged, or this server can’t read its format. Try a JPG, PNG or WebP.');
+    }
+    if ($size[0] < 16 || $size[1] < 16) {
         throw new RuntimeException('That image is too small to use.');
     }
-    if ($size && $size[0] * $size[1] > IMAGE_MAX_PIXELS) {
-        throw new RuntimeException('That image is enormous. Use one under 50 megapixels.');
+    if ($size[0] * $size[1] > $maxPixels) {
+        throw new RuntimeException('That image is enormous. Use one under ' . (int)($maxPixels / 1000000) . ' megapixels.');
     }
+    if (!gd_has_memory_for($size[0], $size[1])) {
+        throw new RuntimeException('That image is too big for this server to process. Use a smaller one.');
+    }
+    $img = gd_load($path, $mime);
+    if (!$img) {
+        throw new RuntimeException('This server can’t read that image. Try a JPG, PNG or WebP.');
+    }
+    $img = gd_fit($img, IMAGE_MAX_EDGE); // shrink first: rotating a full-size photo doubles the memory
+    $img = gd_upright($img, $path, $mime);
+
     ensure_uploads();
     $stem = uploads_dir() . '/items/' . str_replace('_', '-', preg_replace('/[^a-z0-9_]/', '', $itemId)) . '-' . bin2hex(random_bytes(4));
-
-    $img = $size ? gd_load($path, $mime) : null;
-    if ($img) {
-        $img = gd_upright($img, $path, $mime);
-        $img = gd_fit($img, IMAGE_MAX_EDGE);
-        if (function_exists('imagewebp')) {
-            $dest = $stem . '.webp';
-            imagesavealpha($img, true);
-            $ok = imagewebp($img, $dest, 84);
-        } else {
-            $dest = $stem . '.jpg';
-            $ok = imagejpeg(gd_flatten($img), $dest, 86);
-        }
-        imagedestroy($img);
-        if (!$ok) {
-            @unlink($dest);
-            throw new RuntimeException('Couldn’t save the photo. Check that the uploads folder is writable.');
-        }
+    if (function_exists('imagewebp')) {
+        $dest = $stem . '.webp';
+        imagesavealpha($img, true);
+        $ok = imagewebp($img, $dest, 84);
     } else {
-        if (!$size && $mime !== 'image/avif') { // unreadable and not a format GD merely can't decode
-            throw new RuntimeException('That image looks damaged. Try another one.');
-        }
-        $dest = $stem . '.' . IMAGE_TYPES[$mime]; // this server can't re-encode it: keep the original
-        if (!@copy($path, $dest)) {
-            throw new RuntimeException('Couldn’t save the photo. Check that the uploads folder is writable.');
-        }
+        $dest = $stem . '.jpg';
+        $ok = imagejpeg(gd_flatten($img), $dest, 86);
+    }
+    imagedestroy($img);
+    if (!$ok) {
+        @unlink($dest);
+        throw new RuntimeException('Couldn’t save the photo. Check that the uploads folder is writable.');
     }
     @chmod($dest, 0644);
     return 'uploads/items/' . basename($dest);
+}
+
+/** Whether decoding a $w × $h image fits in PHP's memory limit (raising it a little if allowed). */
+function gd_has_memory_for(int $w, int $h): bool
+{
+    $need = (int)($w * $h * 5.5) + 24 * 1024 * 1024; // truecolor pixels + decoder buffers + the rest of the request
+    if (ini_bytes('memory_limit') - memory_get_usage(true) >= $need) {
+        return true; // ini_bytes() reads "no limit" as PHP_INT_MAX
+    }
+    $want = memory_get_usage(true) + $need;
+    if ($want > 1024 * 1024 * 1024) {
+        return false;
+    }
+    return @ini_set('memory_limit', (string)(int)ceil($want / 1048576) . 'M') !== false
+        && ini_bytes('memory_limit') >= $want;
 }
 
 /** Deletes a stored item photo, but only a file that really lives in uploads/items/. */

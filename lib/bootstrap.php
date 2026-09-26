@@ -25,6 +25,19 @@ if (realpath($_SERVER['SCRIPT_FILENAME'] ?? '') === __FILE__) {
 
 const PRIVATE_DIR_NAME = 'findom-private';
 
+// Visitors never see PHP's own error output (it would reveal server paths); errors go to the log.
+if (PHP_SAPI !== 'cli' && PHP_SAPI !== 'cli-server') {
+    ini_set('display_errors', '0');
+}
+set_exception_handler(function (Throwable $e) {
+    error_log('findomyourself: ' . $e);
+    if (!headers_sent()) {
+        http_response_code(500);
+        header('Cache-Control: no-store');
+    }
+    echo 'Something went wrong on the server. Try again in a moment.';
+});
+
 /* ───────────────────────── paths ───────────────────────── */
 
 function site_dir(): string
@@ -99,18 +112,12 @@ function tmp_dir(): string
     return $dir;
 }
 
-/** Creates uploads/ with a folder rule that never executes anything inside it. */
-function ensure_uploads(): void
-{
-    $items = uploads_dir() . '/items';
-    if (!is_dir($items) && !@mkdir($items, 0755, true)) {
-        json_fail(500, 'Could not create the uploads folder. Check folder permissions.');
-    }
-    write_if_missing(uploads_dir() . '/.htaccess', <<<HTACCESS
-# Uploaded photos only: never execute anything in here.
+const UPLOADS_HTACCESS = <<<'HTACCESS'
+# Item photos only: nothing but image files is ever served from here, and nothing runs.
 Options -Indexes
-<FilesMatch "\\.(php[0-9]?|phtml|phar|pl|py|cgi|sh|shtml|htaccess|htpasswd|svg|html?)$">
-  Require all denied
+Require all denied
+<FilesMatch "^[a-z0-9_-]+\.(webp|jpe?g|png|gif|avif)$">
+  Require all granted
 </FilesMatch>
 RemoveHandler .php .phtml .php3 .php4 .php5 .php7 .php8 .phar
 RemoveType .php .phtml .php3 .php4 .php5 .php7 .php8 .phar
@@ -118,13 +125,25 @@ RemoveType .php .phtml .php3 .php4 .php5 .php7 .php8 .phar
   php_flag engine off
 </IfModule>
 <IfModule mod_headers.c>
-  Header set X-Content-Type-Options "nosniff"
-  Header set Cache-Control "public, max-age=31536000, immutable"
+  <FilesMatch "\.(webp|jpe?g|png|gif|avif)$">
+    Header set X-Content-Type-Options "nosniff"
+    Header set Cache-Control "public, max-age=31536000, immutable"
+  </FilesMatch>
 </IfModule>
 
-HTACCESS);
-    write_if_missing(uploads_dir() . '/index.html', '');
-    write_if_missing($items . '/index.html', '');
+HTACCESS;
+
+/** Creates uploads/ with its folder rule (and brings an older rule up to date). */
+function ensure_uploads(): void
+{
+    $items = uploads_dir() . '/items';
+    if (!is_dir($items) && !@mkdir($items, 0755, true)) {
+        json_fail(500, 'Could not create the uploads folder. Check folder permissions.');
+    }
+    $rule = uploads_dir() . '/.htaccess';
+    if (@file_get_contents($rule) !== UPLOADS_HTACCESS) {
+        @file_put_contents($rule, UPLOADS_HTACCESS, LOCK_EX);
+    }
 }
 
 function write_if_missing(string $path, string $contents): void
@@ -172,7 +191,9 @@ function with_lock(string $path, callable $fn)
         json_fail(500, 'Could not lock the data file. Check that the private folder is writable.');
     }
     try {
-        flock($lock, LOCK_EX);
+        if (!flock($lock, LOCK_EX)) {
+            json_fail(500, 'Could not lock the data file. Try again in a moment.');
+        }
         return $fn();
     } finally {
         flock($lock, LOCK_UN);
@@ -222,6 +243,27 @@ function is_https(): bool
 function client_ip(): string
 {
     return substr((string)($_SERVER['REMOTE_ADDR'] ?? 'unknown'), 0, 64);
+}
+
+/** Who a visitor is for rate limits: their IPv4 address, or their IPv6 /64 (one home or phone). */
+function client_key(): string
+{
+    $ip = client_ip();
+    if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
+        $packed = inet_pton($ip);
+        if ($packed !== false) {
+            return bin2hex(substr($packed, 0, 8)) . '::/64';
+        }
+    }
+    return $ip;
+}
+
+/** Browsers remember to use HTTPS (only sent on HTTPS; harmless anywhere else). */
+function send_hsts(): void
+{
+    if (is_https()) {
+        header('Strict-Transport-Security: max-age=15552000');
+    }
 }
 
 function h(string $s): string
