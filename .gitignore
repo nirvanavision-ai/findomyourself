@@ -1,0 +1,9 @@
+# Runtime data lives on the server only, so code deploys never overwrite it.
+/uploads/
+/private/
+/lib/config.local.php
+
+# Local tooling
+node_modules/
+.DS_Store
+*.log
