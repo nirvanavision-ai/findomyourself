@@ -1,0 +1,8 @@
+# Control Room: no listings, no indexing, no framing.
+Options -Indexes
+DirectoryIndex index.php
+
+<IfModule mod_headers.c>
+  Header set X-Robots-Tag "noindex, nofollow"
+  Header set X-Frame-Options "DENY"
+</IfModule>
