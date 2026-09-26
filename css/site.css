@@ -708,11 +708,10 @@ html.js [data-reveal].is-in { opacity: 1; transform: none; }
   position: absolute; left: 0; right: 0; top: 0;
   height: calc((1 - var(--p, 0)) * 100%);
   display: grid; place-items: center;
-  -webkit-backdrop-filter: blur(16px) saturate(.35) brightness(1.03);
-  backdrop-filter: blur(16px) saturate(.35) brightness(1.03);
+  /* Clear glass, not frost: the photo stays in plain view (look, don't touch). */
   background:
-    repeating-linear-gradient(-45deg, rgba(40, 20, 30, .045) 0 1px, transparent 1px 11px),
-    linear-gradient(180deg, rgba(239, 232, 225, .6), rgba(239, 232, 225, .28));
+    repeating-linear-gradient(-45deg, rgba(255, 255, 255, .07) 0 1px, transparent 1px 12px),
+    linear-gradient(180deg, rgba(20, 8, 14, .05), rgba(20, 8, 14, .14));
   transition: height 1.6s var(--ease-out);
 }
 .card__frost::after { /* the water line */
