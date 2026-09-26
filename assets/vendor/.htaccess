@@ -1,0 +1,6 @@
+# Vendored libraries carry their version in the file name, so they can be cached for good.
+<IfModule mod_headers.c>
+  <FilesMatch "\.js$">
+    Header set Cache-Control "public, max-age=31536000, immutable"
+  </FilesMatch>
+</IfModule>
