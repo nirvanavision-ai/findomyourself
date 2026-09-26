@@ -1,0 +1,16 @@
+{
+  "name": "findomyourself",
+  "private": true,
+  "type": "module",
+  "description": "findomyourself.com: a wishlist that only unlocks when the work is done. Dev tooling only; the site has no build step.",
+  "scripts": {
+    "vendor": "node tools/build-vendor.mjs",
+    "test": "php tools/test.php && node tools/smoke.mjs",
+    "serve": "php -S 127.0.0.1:8080 tools/router.php"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "lenis": "1.3.26",
+    "three": "0.186.1"
+  }
+}
