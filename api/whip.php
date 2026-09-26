@@ -22,11 +22,11 @@ if (($_SERVER['HTTP_X_FINDOM'] ?? '') !== '1') {
     json_fail(403, 'Nice try.');
 }
 $data = load_data();
-if (!$data['settings']['whip']) {
-    json_fail(403, 'The whip is put away for now.');
-}
 if (!has_view_access($data['settings'])) {
     json_fail(401, 'This site is private.');
+}
+if (!$data['settings']['whip']) {
+    json_fail(403, 'The whip is put away for now.');
 }
 
 $in = request_json(1024);
@@ -42,16 +42,16 @@ $result = with_lock(whips_file(), function () use ($count, $tz) {
             unset($limits[$k]);
         }
     }
-    $key = substr(hash_hmac('sha256', client_ip(), site_secret()), 0, 20);
+    $key = substr(hash_hmac('sha256', client_key(), site_secret()), 0, 20);
     $entry = $limits[$key] ?? ['t' => $now, 'n' => 0];
     $allowed = max(0, min($count, WHIP_MAX_PER_WINDOW - (int)$entry['n']));
-    $entry['n'] = (int)$entry['n'] + $allowed;
-    $limits[$key] = $entry;
-    write_json($limitsFile, $limits);
 
     $whips = load_whips();
     $today = local_day($now, $tz);
-    if ($allowed > 0) {
+    if ($allowed > 0) { // nothing counted, nothing written
+        $entry['n'] = (int)$entry['n'] + $allowed;
+        $limits[$key] = $entry;
+        write_json($limitsFile, $limits);
         $whips['total'] += $allowed;
         $whips['days'][$today] = ($whips['days'][$today] ?? 0) + $allowed;
         krsort($whips['days']);

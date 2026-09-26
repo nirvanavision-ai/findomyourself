@@ -13,15 +13,18 @@ header('Referrer-Policy: same-origin');
 header('Cache-Control: no-cache');
 
 $data = load_data();
+send_private_cache_headers($data['settings']);
 if (!has_view_access($data['settings'])) {
     header('Cache-Control: no-store');
     json_fail(401, 'This site is private.', ['locked' => true]);
 }
 
-$json = json_encode(['ok' => true, 'state' => public_state($data)], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION);
+$json = json_encode(['ok' => true, 'state' => cached_public_state($data)], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION);
 $etag = '"' . substr(sha1((string)$json), 0, 24) . '"';
 header('ETag: ' . $etag);
-if (trim((string)($_SERVER['HTTP_IF_NONE_MATCH'] ?? '')) === $etag) {
+// Compression layers and CDNs may hand the tag back weak ("W/") or suffixed ("-gzip").
+$sent = (string)preg_replace(['#^W/#', '#-(gzip|br|deflate)"$#'], ['', '"'], trim((string)($_SERVER['HTTP_IF_NONE_MATCH'] ?? '')));
+if ($sent === $etag) {
     http_response_code(304);
     exit;
 }

@@ -284,9 +284,9 @@ export function createSettings() {
   const visSeg = segmented({ legend: 'Who can see the site', options: VISIBILITY, value: 'public', className: 'seg-fill seg-stack-phone', onChange: (v) => { draft.visibility = v; syncVisHint(); sync(); } });
   const visHint = h('p', { class: 'field-hint' });
   const syncVisHint = () => { visHint.textContent = (VISIBILITY.find((v) => v.value === draft.visibility) || VISIBILITY[0]).hint; };
-  const passcode = textInput({ autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', minlength: 4, maxlength: 100 });
+  const passcode = textInput({ autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', minlength: 8, maxlength: 100 });
   bind(passcode, 'passcode');
-  const passcodeField = field({ label: 'Passcode for visitors', control: passcode, hint: 'Share it with whoever gets to watch. At least 4 characters.' });
+  const passcodeField = field({ label: 'Passcode for visitors', control: passcode, hint: 'Share it with whoever gets to watch. At least 8 characters.' });
   const liveToggle = toggle({ label: 'Live timer light', hint: 'Visitors see when a focus session is running.', onChange: (v) => { draft.showLive = v; sync(); } });
   const ledgerToggle = toggle({ label: 'Public receipts', hint: 'The latest tributes and fines show on the site.', onChange: (v) => { draft.showLedger = v; sync(); } });
   const whipToggle = toggle({ label: 'Crack-the-whip section', hint: 'Visitors can crack the whip at you. You’ll see the count on Today.', onChange: (v) => { draft.whip = v; sync(); } });
@@ -498,7 +498,7 @@ export function createSettings() {
     if (draft.timezone !== saved.timezone) patch.timezone = draft.timezone;
     if (draft.visibility !== saved.visibility) patch.visibility = draft.visibility;
     if (draft.passcode.trim()) {
-      if (draft.passcode.trim().length < 4) throw new Error('Use at least 4 characters for the passcode.');
+      if (draft.passcode.trim().length < 8) throw new Error('Use at least 8 characters for the passcode.');
       patch.passcode = draft.passcode.trim();
     }
     if (draft.visibility === 'private' && !s.settings.hasPasscode && !patch.passcode) {

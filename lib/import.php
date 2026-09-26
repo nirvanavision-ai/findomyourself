@@ -34,20 +34,6 @@ const IMPORT_FIELDS = [
     'image' => ['image', 'photo', 'picture', 'img', 'image link', 'photo link'],
 ];
 const CURRENCY_SYMBOLS = ['€' => 'EUR', '£' => 'GBP', '¥' => 'JPY', '₩' => 'KRW', '₹' => 'INR', '₪' => 'ILS', '$' => 'USD'];
-const KNOWN_BRANDS = [
-    'AMIRI', 'Versace', 'Chrome Hearts', 'L’Objet', "L'Objet", 'Transparent', 'Gucci', 'Prada', 'Louis Vuitton', 'Dior',
-    'Chanel', 'Hermès', 'Hermes', 'Balenciaga', 'Bottega Veneta', 'Saint Laurent', 'YSL', 'Valentino', 'Fendi',
-    'Givenchy', 'Celine', 'Loewe', 'Miu Miu', 'Burberry', 'Alexander McQueen', 'Off-White', 'Rick Owens',
-    'Maison Margiela', 'Jacquemus', 'The Row', 'Khaite', 'Mugler', 'Jean Paul Gaultier', 'Vivienne Westwood',
-    'Christian Louboutin', 'Louboutin', 'Jimmy Choo', 'Manolo Blahnik', 'Aquazzura', 'Gianvito Rossi', 'Amina Muaddi',
-    'Cartier', 'Tiffany & Co.', 'Van Cleef & Arpels', 'Bulgari', 'Bvlgari', 'Rolex', 'Apple', 'Dyson',
-    'Bang & Olufsen', 'Diptyque', 'Le Labo', 'Byredo', 'Aesop', 'Skims', 'Moncler', 'Nike', 'Adidas', 'New Balance',
-    'Salomon', 'Acne Studios', 'Ganni', 'Zimmermann', 'Dolce & Gabbana', 'Balmain', 'Tom Ford', 'Stella McCartney',
-    'Chloé', 'Marni', 'Alaïa', 'Ferragamo', 'Roger Vivier', 'Golden Goose', 'Palm Angels', 'Fear of God', 'Loro Piana',
-    'Brunello Cucinelli', 'Missoni', 'Fornasetti', 'Seletti', 'Gufram', 'Baccarat', 'Lalique', 'Christofle',
-    'Ginori 1735', 'Louis Poulsen', 'Flos', 'Jil Sander', 'Lemaire', 'Toteme', 'Coperni', 'Ludovic de Saint Sernin',
-    'Dsquared2', 'Moschino', 'Maison Kitsuné', 'Stüssy', 'Supreme', 'Palace', 'Kith', 'Telfar', 'Marc Jacobs',
-];
 
 /**
  * Returns a list of ['name','brand','variant','category','price','currency','url','image','note','priority'].
@@ -95,7 +81,7 @@ function parse_wishlist_text(string $text, array $knownBrands = []): array
         }
         $body = (string)preg_replace('/^(\d{1,3}[.)]|[-*•+])\s+/u', '', $line);
         $urls = find_urls($body);
-        $rest = trim(strip_markdown(remove_urls($body)), " \t-–—|:·,");
+        $rest = trim_separators(strip_markdown(remove_urls($body)));
         // A line that is only a link belongs to the item above it, if that one has no link yet.
         if ($current !== null && $current['url'] === '' && $urls && $rest === '') {
             $current['url'] = $urls[0];
@@ -106,13 +92,9 @@ function parse_wishlist_text(string $text, array $knownBrands = []): array
     }
     $flush();
 
-    $brands = array_merge($knownBrands, KNOWN_BRANDS);
-    usort($brands, function ($a, $b) {
-        return mb_strlen($b) <=> mb_strlen($a);
-    });
     $out = [];
     foreach (array_slice($items, 0, IMPORT_MAX_ITEMS) as $item) {
-        $item = finish_import_item($item, $brands);
+        $item = finish_import_item($item, $knownBrands);
         if ($item['name'] !== '') {
             $out[] = $item;
         }
@@ -191,7 +173,7 @@ function import_inline_item(string $body, string $category): array
         $text = str_replace($matched, ' ', $text);
     }
     $text = (string)preg_replace('/\(\s*~?\s*\)/u', '', $text);
-    $item['name'] = trim(strip_markdown($text), " \t-–—|:·,;");
+    $item['name'] = trim_separators(strip_markdown($text));
     $item['url'] = $urls[0] ?? '';
     return $item;
 }
@@ -226,7 +208,7 @@ function import_row(array $cells, string $category): array
     return $item;
 }
 
-function finish_import_item(array $item, array $brands): array
+function finish_import_item(array $item, array $knownBrands): array
 {
     $name = strip_markdown($item['name']);
     if ($name === '' && $item['url'] !== '') {
@@ -240,15 +222,7 @@ function finish_import_item(array $item, array $brands): array
         }
     }
     if ($item['brand'] === '') {
-        foreach ($brands as $brand) {
-            $b = (string)$brand;
-            if ($b !== '' && mb_strlen($name) > mb_strlen($b) + 2
-                && mb_strtolower(mb_substr($name, 0, mb_strlen($b) + 1)) === mb_strtolower($b . ' ')) {
-                $item['brand'] = $b === "L'Objet" ? 'L’Objet' : $b;
-                $name = trim(mb_substr($name, mb_strlen($b)));
-                break;
-            }
-        }
+        [$item['brand'], $name] = split_brand($name, $knownBrands);
     }
     $name = (string)preg_replace("/^(women['’]?s|men['’]?s)\s+/iu", '', $name);
     $item['name'] = clean_text($name, 140);
@@ -277,6 +251,12 @@ function find_urls(string $text): array
         }
     }
     return array_values(array_unique(array_map('normalize_link', $urls)));
+}
+
+/** Trims spaces and separators (- – — | : · , ;) from both ends. trim() would cut multibyte characters apart. */
+function trim_separators(string $text): string
+{
+    return (string)preg_replace('/^[\s\-–—|:·,;]+|[\s\-–—|:·,;]+$/u', '', $text);
 }
 
 function remove_markdown_links(string $text): string

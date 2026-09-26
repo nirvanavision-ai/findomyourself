@@ -52,15 +52,22 @@ function is_public_ip(string $ip): bool
         return true;
     }
     $packed = inet_pton($ip);
-    if ($packed === false) {
+    if ($packed === false || strlen($packed) !== 16) {
         return false;
     }
-    // IPv4-mapped / NAT64 addresses hide an IPv4 address inside IPv6: check that one instead.
-    if (substr($packed, 0, 12) === str_repeat("\0", 10) . "\xff\xff" || substr($packed, 0, 12) === "\x00\x64\xff\x9b" . str_repeat("\0", 8)) {
-        return is_public_ip((string)inet_ntop(substr($packed, 12)));
+    // IPv6: only global unicast (2000::/3), minus ranges that aren't really out on the internet:
+    // Teredo 2001::/32, benchmarking 2001:2::/48, ORCHIDv2 2001:20::/28, documentation 2001:db8::/32
+    // and 3fff::/20, and 6to4 2002::/16 (which can wrap a private IPv4 address).
+    if ((ord($packed[0]) & 0xe0) !== 0x20) {
+        return false;
     }
-    $first = ord($packed[0]);
-    return !($first === 0xfc || $first === 0xfd || $first === 0xfe || $first === 0xff);
+    $hex = bin2hex($packed);
+    foreach (['20010000', '200100020000', '2001002', '20010db8', '3fff0', '2002'] as $prefix) {
+        if (strncmp($hex, $prefix, strlen($prefix)) === 0) {
+            return false;
+        }
+    }
+    return true;
 }
 
 /** A public address for $host, or null. Refuses the host if any of its addresses is private. */
@@ -149,15 +156,21 @@ function safe_request(string $url, int $maxBytes, string $accept, array $headers
         if ($ip === null) {
             throw new RuntimeException('Couldn’t find ' . $host . ' on the public internet.');
         }
+        $literal = filter_var(trim($host, '[]'), FILTER_VALIDATE_IP) !== false; // nothing to resolve, nothing to pin
 
         $body = '';
         $tooBig = false;
         $responseHeaders = [];
-        $ch = curl_init($url);
+        try {
+            $ch = curl_init($url);
+        } catch (ValueError $e) { // e.g. a NUL byte smuggled into a link
+            throw new RuntimeException('That isn’t a normal web link.');
+        }
         curl_setopt_array($ch, [
             CURLOPT_FOLLOWLOCATION => false,
             CURLOPT_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS,
-            CURLOPT_RESOLVE => [$host . ':' . $port . ':' . (strpos($ip, ':') !== false ? '[' . $ip . ']' : $ip)],
+            CURLOPT_PROXY => '', // straight to the checked address: a proxy would resolve names itself
+            CURLOPT_RESOLVE => $literal ? [] : [$host . ':' . $port . ':' . (strpos($ip, ':') !== false ? '[' . $ip . ']' : $ip)],
             CURLOPT_CONNECTTIMEOUT => 5,
             CURLOPT_TIMEOUT => FETCH_TIMEOUT,
             CURLOPT_ENCODING => '',
@@ -295,7 +308,7 @@ function name_from_url(string $url): string
  * ['url','store','name','brand','variant','price','currency','image','found','blocked','error'].
  * Never throws: when the shop can't be reached, the name still comes from the link itself.
  */
-function inspect_link(string $rawUrl): array
+function inspect_link(string $rawUrl, array $knownBrands = []): array
 {
     $url = normalize_link($rawUrl);
     if (clean_url($url) === '') {
@@ -319,7 +332,7 @@ function inspect_link(string $rawUrl): array
                 }
                 $image = $p['featured_image'] ?? ($p['images'][0] ?? '');
                 if (is_string($image) && $image !== '') {
-                    $info['image'] = resolve_url($url, $image);
+                    $info['image'] = clean_url(resolve_url($url, $image));
                 }
                 $info['found'] = true;
             }
@@ -358,6 +371,12 @@ function inspect_link(string $rawUrl): array
         $info['brand'] = $info['store'];
     }
     $info['name'] = tidy_product_name($info['name'], $info['brand'], $info['store']);
+    if ($info['brand'] === '') { // multi-brand shops: "Gucci Horsebit loafers" → Gucci + Horsebit loafers
+        [$info['brand'], $info['name']] = split_brand($info['name'], $knownBrands);
+    }
+    if ($info['name'] === '') {
+        $info['name'] = name_from_url($url) ?: $info['store'] . ' find';
+    }
     if ($info['currency'] === '' && $info['price'] !== null) {
         $info['currency'] = guess_store_currency($url);
     }
@@ -498,15 +517,49 @@ function ld_image($value): string
     return '';
 }
 
-/** Drops shop suffixes ("… | FARFETCH") and a duplicated brand prefix from a product name. */
+/** Drops shop suffixes ("… | FARFETCH", "… — FARFETCH") and a duplicated brand prefix from a product name. */
 function tidy_product_name(string $name, string $brand, string $store): string
 {
-    $name = trim((string)preg_replace('/\s*[|–—-]\s*(' . preg_quote($store, '/') . '|farfetch|amiri|ssense|shop now|buy online)[^|–—-]*$/i', '', $name));
-    $name = trim((string)preg_replace('/\s*[|]\s*[^|]*$/', '', $name));
-    if ($brand !== '' && stripos($name, $brand . ' ') === 0 && mb_strlen($name) > mb_strlen($brand) + 3) {
+    $original = clean_text($name, 140);
+    $name = trim((string)preg_replace('/\s*[|–—-]\s*(' . preg_quote($store, '/') . '|farfetch|amiri|ssense|shop now|buy online)[^|–—]*$/iu', '', $name));
+    $name = trim((string)preg_replace('/\s*[|]\s*[^|]*$/u', '', $name));
+    if ($brand !== '' && mb_stripos($name, $brand . ' ') === 0 && mb_strlen($name) > mb_strlen($brand) + 3) {
         $name = trim(mb_substr($name, mb_strlen($brand)));
     }
-    return clean_text($name, 140);
+    return clean_text($name, 140) ?: $original;
+}
+
+/** Luxury and design brands recognized at the start of a product name. */
+const KNOWN_BRANDS = [
+    'AMIRI', 'Versace', 'Chrome Hearts', 'L’Objet', "L'Objet", 'Transparent', 'Gucci', 'Prada', 'Louis Vuitton', 'Dior',
+    'Chanel', 'Hermès', 'Hermes', 'Balenciaga', 'Bottega Veneta', 'Saint Laurent', 'YSL', 'Valentino', 'Fendi',
+    'Givenchy', 'Celine', 'Loewe', 'Miu Miu', 'Burberry', 'Alexander McQueen', 'Off-White', 'Rick Owens',
+    'Maison Margiela', 'Jacquemus', 'The Row', 'Khaite', 'Mugler', 'Jean Paul Gaultier', 'Vivienne Westwood',
+    'Christian Louboutin', 'Louboutin', 'Jimmy Choo', 'Manolo Blahnik', 'Aquazzura', 'Gianvito Rossi', 'Amina Muaddi',
+    'Cartier', 'Tiffany & Co.', 'Van Cleef & Arpels', 'Bulgari', 'Bvlgari', 'Rolex', 'Apple', 'Dyson',
+    'Bang & Olufsen', 'Diptyque', 'Le Labo', 'Byredo', 'Aesop', 'Skims', 'Moncler', 'Nike', 'Adidas', 'New Balance',
+    'Salomon', 'Acne Studios', 'Ganni', 'Zimmermann', 'Dolce & Gabbana', 'Balmain', 'Tom Ford', 'Stella McCartney',
+    'Chloé', 'Marni', 'Alaïa', 'Ferragamo', 'Roger Vivier', 'Golden Goose', 'Palm Angels', 'Fear of God', 'Loro Piana',
+    'Brunello Cucinelli', 'Missoni', 'Fornasetti', 'Seletti', 'Gufram', 'Baccarat', 'Lalique', 'Christofle',
+    'Ginori 1735', 'Louis Poulsen', 'Flos', 'Jil Sander', 'Lemaire', 'Toteme', 'Coperni', 'Ludovic de Saint Sernin',
+    'Dsquared2', 'Moschino', 'Maison Kitsuné', 'Stüssy', 'Supreme', 'Palace', 'Kith', 'Telfar', 'Marc Jacobs',
+];
+
+/** [brand, rest of the name] when the name starts with a known brand, else ['', name]. */
+function split_brand(string $name, array $extraBrands = []): array
+{
+    $brands = array_merge($extraBrands, KNOWN_BRANDS);
+    usort($brands, function ($a, $b) {
+        return mb_strlen((string)$b) <=> mb_strlen((string)$a);
+    });
+    foreach ($brands as $brand) {
+        $b = (string)$brand;
+        if ($b !== '' && mb_strlen($name) > mb_strlen($b) + 2
+            && mb_strtolower(mb_substr($name, 0, mb_strlen($b) + 1)) === mb_strtolower($b . ' ')) {
+            return [$b === "L'Objet" ? 'L’Objet' : $b, trim(mb_substr($name, mb_strlen($b)))];
+        }
+    }
+    return ['', $name];
 }
 
 /** Shops that only sell their own brand, so the store name is the brand. */

@@ -45,15 +45,15 @@ require __DIR__ . '/../lib/import.php';
 const EDITABLE_ITEM_FIELDS = ['name', 'brand', 'variant', 'category', 'price', 'currency', 'url', 'priority', 'note'];
 
 send_admin_headers();
-start_session();
 
-$action = (string)($_GET['action'] ?? '');
+$action = is_string($_GET['action'] ?? null) ? $_GET['action'] : '';
 $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 
 if ($action === 'login' && $method === 'POST') {
     api_login();
 }
-if (!is_set_up() || !is_authed()) {
+// Resumes the owner's session only; anonymous requests never create one.
+if (!is_set_up() || !start_session() || !is_authed()) {
     json_fail(401, 'You were signed out. Sign in again to keep going.', ['code' => 'auth']);
 }
 session_write_close(); // nothing below changes the session: don't make parallel requests wait on its lock
@@ -187,7 +187,7 @@ function attach_image_from_url(string $id, string $url): string
     $referer = $index !== null ? $data['items'][$index]['url'] : '';
     $tmp = download_image($url, $referer);
     try {
-        $path = store_item_image($tmp, $id);
+        $path = store_item_image($tmp, $id, IMAGE_MAX_PIXELS_REMOTE);
     } finally {
         @unlink($tmp);
     }
@@ -281,10 +281,16 @@ function act_item_save(array $in): array
     return ['itemId' => $id, 'warnings' => $warnings];
 }
 
+/** Brands already on the list, so a link or pasted name starting with one gets it split off. */
+function wishlist_brands(array $data): array
+{
+    return array_values(array_unique(array_filter(array_map('strval', array_column($data['items'], 'brand')))));
+}
+
 function act_link_inspect(array $in): array
 {
     try {
-        return ['info' => inspect_link((string)($in['url'] ?? ''))];
+        return ['info' => inspect_link((string)($in['url'] ?? ''), wishlist_brands(load_data()))];
     } catch (RuntimeException $e) {
         fail_on($e, 400);
     }
@@ -296,7 +302,7 @@ function act_item_from_link(array $in): array
 {
     @set_time_limit(60);
     try {
-        $info = inspect_link((string)($in['url'] ?? ''));
+        $info = inspect_link((string)($in['url'] ?? ''), wishlist_brands(load_data()));
     } catch (RuntimeException $e) {
         fail_on($e, 400);
         return [];
@@ -313,7 +319,7 @@ function act_item_from_link(array $in): array
         }
         $item = normalize_item([
             'id' => new_id('i'),
-            'name' => $info['name'],
+            'name' => $info['name'] !== '' ? $info['name'] : ($info['store'] ?: 'New') . ' find',
             'brand' => $info['brand'],
             'variant' => $info['variant'],
             'category' => clean_text($in['category'] ?? '', 60),
@@ -353,8 +359,7 @@ function act_items_parse(array $in): array
         json_fail(413, 'That’s a lot of text. Paste up to 200 items at a time.');
     }
     $data = load_data();
-    $brands = array_values(array_unique(array_filter(array_column($data['items'], 'brand'))));
-    $items = parse_wishlist_text($text, $brands);
+    $items = parse_wishlist_text($text, wishlist_brands($data));
     $urls = [];
     $names = [];
     foreach ($data['items'] as $item) {
@@ -765,8 +770,8 @@ function act_settings_save(array $in): array
             $next['voice'] = array_merge($s['voice'], $patch['voice']);
         }
         if (isset($patch['passcode']) && is_string($patch['passcode']) && $patch['passcode'] !== '') {
-            if (mb_strlen($patch['passcode']) < 4) {
-                json_fail(400, 'Use at least 4 characters for the site passcode.');
+            if (($problem = password_problem($patch['passcode'], MIN_PASSCODE_LENGTH)) !== '') {
+                json_fail(400, 'Site passcode: ' . lcfirst($problem));
             }
             $next['passcodeHash'] = password_hash($patch['passcode'], PASSWORD_DEFAULT);
         }
@@ -787,6 +792,7 @@ function act_settings_save(array $in): array
         }
         $data['settings'] = normalize_settings($next);
     });
+    grant_view_access(load_data()['settings']); // going private (or a new passcode) keeps this device in
     return [];
 }
 
@@ -828,20 +834,19 @@ function act_fx_refresh(array $in): array
 
 function act_password_change(array $in): array
 {
-    if (($wait = lockout_seconds()) > 0) {
+    $next = $in['next'] ?? '';
+    if (($problem = password_problem($next, MIN_PASSWORD_LENGTH)) !== '') {
+        json_fail(400, $problem);
+    }
+    if (($wait = begin_attempt('admin')) > 0) {
         json_fail(429, lockout_message($wait));
     }
-    if (!verify_password((string)($in['current'] ?? ''))) {
-        record_failure();
+    if (!verify_password($in['current'] ?? '')) {
         json_fail(403, 'Your current password is wrong.');
     }
-    $next = (string)($in['next'] ?? '');
-    if (mb_strlen($next) < MIN_PASSWORD_LENGTH) {
-        json_fail(400, 'Use at least ' . MIN_PASSWORD_LENGTH . ' characters for the new password.');
-    }
-    set_password($next);
-    session_start(); // the session was closed for writing earlier
-    log_in();
+    clear_attempts('admin');
+    set_password($next); // new epoch: every other signed-in device is signed out
+    log_in();            // …but not this one
     return ['csrf' => csrf_token()];
 }
 
@@ -870,14 +875,14 @@ function api_login(): void
     if (!is_set_up()) {
         json_fail(401, 'The Control Room isn’t set up yet. Reload the page.');
     }
-    if (($wait = lockout_seconds()) > 0) {
+    $in = request_json(4096);
+    if (($wait = begin_attempt('admin')) > 0) {
         json_fail(429, lockout_message($wait));
     }
-    $in = request_json(4096);
-    if (!verify_password((string)($in['password'] ?? ''))) {
-        record_failure();
+    if (!verify_password($in['password'] ?? '')) {
         json_fail(403, 'That password is wrong.');
     }
+    clear_attempts('admin');
     log_in();
     json_out(['ok' => true, 'csrf' => csrf_token()]);
 }

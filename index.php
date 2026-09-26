@@ -13,26 +13,32 @@ header('X-Content-Type-Options: nosniff');
 header('Referrer-Policy: strict-origin-when-cross-origin');
 header('X-Frame-Options: SAMEORIGIN');
 header('Cache-Control: no-cache');
-header("Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self'; connect-src 'self'; media-src 'self' data: blob:; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'");
+header("Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; media-src 'self' data: blob:; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'");
+send_hsts();
 
 $data = load_data();
 $s = $data['settings'];
+send_private_cache_headers($s);
 
 /* ───── private mode: ask for the passcode ───── */
 if (!has_view_access($s)) {
     $error = '';
     if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
-        if (($wait = lockout_seconds('view')) > 0) {
+        $passcode = is_string($_POST['passcode'] ?? null) ? $_POST['passcode'] : '';
+        if (!check_form_token($_POST['csrf'] ?? null)) {
+            $error = 'That form expired. Try again.';
+        } elseif (($wait = begin_attempt('view')) > 0) {
             $error = lockout_message($wait);
-        } elseif (password_verify((string)($_POST['passcode'] ?? ''), (string)$s['passcodeHash'])) {
+        } elseif (strpos($passcode, "\0") === false && password_verify($passcode, (string)$s['passcodeHash'])) {
+            clear_attempts('view');
             grant_view_access($s);
             header('Location: ./', true, 303);
             exit;
         } else {
-            record_failure('view');
             $error = 'Wrong. Try again, and mean it this time.';
         }
     }
+    $formToken = form_token(); // sets a cookie, so before any output
     http_response_code(401);
     header('X-Robots-Tag: noindex');
     ?><!doctype html>
@@ -52,6 +58,7 @@ if (!has_view_access($s)) {
     <h1><em>Findom</em> <span>Yourself</span></h1>
     <p>This wishlist is invitation only. Knock politely.</p>
     <?php if ($error): ?><p class="passgate__error" role="alert"><?= h($error) ?></p><?php endif; ?>
+    <input type="hidden" name="csrf" value="<?= h($formToken) ?>">
     <label for="passcode">Passcode</label>
     <input id="passcode" name="passcode" type="password" required autofocus autocomplete="current-password">
     <button class="btn btn--primary" type="submit">Let me in</button>
@@ -63,7 +70,7 @@ if (!has_view_access($s)) {
 }
 
 /* ───── the site ───── */
-$state = public_state($data);
+$state = cached_public_state($data);
 $copy = $state['settings']['copy'];
 
 $scheme = is_https() ? 'https' : 'http';

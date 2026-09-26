@@ -57,13 +57,13 @@ const VOICE_MOODS = ['taunts', 'working', 'slacking', 'praise', 'unlocked', 'emp
 /** The current data. On the very first request the wishlist is seeded and saved. */
 function load_data(): array
 {
-    $data = read_json(data_file(), null);
-    if (is_array($data)) {
+    $data = read_data_file();
+    if ($data !== null) {
         return normalize_data($data);
     }
     return with_lock(data_file(), function () {
-        $data = read_json(data_file(), null);
-        if (!is_array($data)) {
+        $data = read_data_file();
+        if ($data === null) {
             $data = normalize_data(seed_data());
             save_data($data);
         }
@@ -71,10 +71,37 @@ function load_data(): array
     });
 }
 
+/**
+ * data.json as an array, or null if there is none yet. A file that exists but can't be read
+ * is never replaced with the seed (that would wipe the ledger): the last good copy
+ * (data.json.bak) is used instead, and without one the request fails loudly.
+ */
+function read_data_file(): ?array
+{
+    $file = data_file();
+    if (!is_file($file)) {
+        return null;
+    }
+    $data = read_json($file, null);
+    if (is_array($data)) {
+        return $data;
+    }
+    $backup = read_json($file . '.bak', null);
+    if (is_array($backup)) {
+        error_log('findomyourself: data.json is unreadable, using data.json.bak');
+        return $backup;
+    }
+    http_response_code(500);
+    exit('The site’s data file (findom-private/data.json) is damaged. Restore it from a backup in the Control Room or your hosting panel.');
+}
+
 function save_data(array $data): void
 {
     $data['schema'] = SCHEMA_VERSION;
     $data['updatedAt'] = iso_now();
+    if (is_array(read_json(data_file(), null))) {
+        @copy(data_file(), data_file() . '.bak'); // one step of undo if a write ever goes wrong
+    }
     write_json(data_file(), $data);
 }
 
@@ -85,8 +112,7 @@ function save_data(array $data): void
 function mutate_data(callable $fn)
 {
     return with_lock(data_file(), function () use ($fn) {
-        $data = read_json(data_file(), null);
-        $data = normalize_data(is_array($data) ? $data : seed_data());
+        $data = normalize_data(read_data_file() ?? seed_data());
         $result = $fn($data);
         $data = normalize_data($data);
         save_data($data);
@@ -521,6 +547,26 @@ function whips_summary(array $whips, string $timezone): array
 
 /* ───────────────────────── views ───────────────────────── */
 
+/**
+ * public_state(), cached in the private folder until the data or the whip counters change (or
+ * the hour turns, since streaks and "today" depend on the date). Keeps every visit cheap.
+ */
+function cached_public_state(array $data): array
+{
+    $tz = new DateTimeZone($data['settings']['timezone']);
+    // Keyed on the content itself (timestamps have one-second resolution; two saves can share one),
+    // plus the local hour for the rolling "this week" and streak numbers.
+    $key = sha1(serialize($data) . '|' . serialize(load_whips()) . '|' . (new DateTimeImmutable('now', $tz))->format('Y-m-d H'));
+    $file = private_dir() . '/public-state.json';
+    $cached = read_json($file, []);
+    if (($cached['key'] ?? '') === $key && is_array($cached['state'] ?? null)) {
+        return $cached['state'];
+    }
+    $state = public_state($data);
+    write_json($file, ['key' => $key, 'state' => $state]);
+    return $state;
+}
+
 /** Everything the public site shows, with amounts removed when the owner hides them. */
 function public_state(array $data): array
 {
@@ -542,17 +588,17 @@ function public_state(array $data): array
             'priceMissing' => $v['priceMissing'],
             'url' => $v['url'],
             'store' => store_name($v['url']),
-            'image' => $v['image'] ?: $v['imageSource'],
-            'imageLocal' => $v['image'] !== '',
+            'image' => $v['image'], // only photos stored here: visitors' browsers never call other sites
             'priority' => $v['priority'],
             'note' => $v['note'],
             'status' => $v['status'],
             'createdAt' => $v['createdAt'],
             'claimedAt' => $v['claimedAt'],
-            'progress' => $v['progress'],
+            // Hidden amounts: exact progress times the (public) shop price would give the balance away.
+            'progress' => $hide && $v['status'] === 'wishing' ? floor($v['progress'] * 10) / 10 : $v['progress'],
             'affordable' => $v['affordable'],
             'toGo' => $hide ? null : $v['toGo'],
-            'hoursToGo' => $v['hoursToGo'],
+            'hoursToGo' => $hide ? null : $v['hoursToGo'],
             'claimedAmount' => $hide ? null : $v['claimedAmount'],
         ];
         return $out;

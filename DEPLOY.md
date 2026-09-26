@@ -9,11 +9,13 @@ theeggplantfiles.com.
 
 ## 1. Add the website
 
-hPanel → **Websites** → **Add website** → choose an **empty PHP/HTML website** (not WordPress, not the
-Website Builder) → pick **findomyourself.com**.
+hPanel → **Websites** → **Add website** → choose **Custom PHP/HTML website** (not WordPress, not the
+Website Builder or Horizons) → use the **existing domain** **findomyourself.com** → **Continue**.
 
-If your plan only allows one website, hPanel will say so when you try to add a second one. Premium and
-Business web hosting plans allow several.
+If **Websites** is empty, check **Domains** in the left menu: a domain on its own can't run the site, it needs
+a **Web Hosting** plan. The plan theeggplantfiles.com is on can host this site too (Premium and Business
+allow several websites); if you don't see theeggplantfiles.com either, you're signed in to a different
+Hostinger account.
 
 ## 2. Turn on HTTPS
 
@@ -33,13 +35,13 @@ Hostinger only deploys into a folder that is **completely empty**. A new website
 1. **Files → File Manager** → open `public_html` → turn on **Show hidden files** in the settings → select
    everything (including `.htaccess`) → **Delete**.
 2. **Advanced → GIT** → *Create a new repository*:
-   - **Repository**: `git@github.com:nirvanavision-ai/findomyourself.git`
+   - **Repository**: `https://github.com/nirvanavision-ai/findomyourself.git`
    - **Branch**: `main`
    - **Directory**: leave **empty** (that means `public_html`)
-3. If the repo is private, Hostinger needs read access. Either click **Connect GitHub** / sign in with
-   GitHub if hPanel offers it and pick the repo, **or** copy the **SSH key** hPanel shows in the GIT section,
-   then in GitHub go to the repo → **Settings → Deploy keys → Add deploy key**, paste it, leave
-   *Allow write access* **off**, and save.
+3. The repo is public, so no key is needed. (If you ever make it private, switch the address to
+   `git@github.com:nirvanavision-ai/findomyourself.git` and add the **SSH key** hPanel shows in the GIT section
+   to the repo in GitHub under **Settings → Deploy keys**, with *Allow write access* **off**. Or use
+   **Connect with GitHub** if hPanel offers it.)
 4. Click **Create**, then **Deploy**. Visit **https://www.findomyourself.com**.
 
 ## 5. Turn on auto-deploy
