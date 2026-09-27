@@ -83,12 +83,83 @@ The site ships with your 12 items but without photos (they're fetched by your se
 - The Chrome Hearts scarf came in as **1,911 €** but the list you pasted also said **~$1,229**. Those don't
   match, so open the item, check the real price, and fix it.
 
+## 9. Set up affiliate links
+
+Optional: the site works without any of this. With it, visitors' shop buttons earn you a commission. Everything
+below is in the Control Room under **Settings → Affiliate links** (the sign-up pages are linked there too, under
+**Where to sign up**). Press **Save changes** when you're done.
+
+1. **Amazon Associates**, for Amazon links (Amazon only pays through its own program). Sign up at
+   [affiliate-program.amazon.com](https://affiliate-program.amazon.com/) with the site's address. Your tracking ID,
+   like `yourname-20`, is at the top right of Associates Central (and under **Manage Tracking IDs**). Paste it into
+   **Tag for amazon.com (US)**. Each other Amazon country (amazon.co.uk, amazon.de…) is a separate sign-up with its
+   own tag: those go under **Other Amazon stores**. Once your tag is saved, any Amazon product link you paste is
+   enough: your tag goes on it by itself. A SiteStripe short link (`amzn.to/…`) you made is recognized as yours;
+   the Amazon app's **Share** links (`a.co/d/…`) carry no tag, so they're treated as plain Amazon links. Read
+   **Amazon's photos and prices** under *Good to know* first.
+2. **Skimlinks or Sovrn Commerce**, for everything else. Pick one, not both. One ID turns links to Gucci, Farfetch,
+   Net-a-Porter, SSENSE, Mytheresa, Nordstrom, Sephora and tens of thousands of other shops into affiliate links on
+   its own; a shop without a program still just works. Sign up at [skimlinks.com](https://skimlinks.com/) or
+   [sovrn.com/commerce](https://www.sovrn.com/commerce/), then under **Everything else, automatically** choose
+   **Skimlinks** or **Sovrn** and paste:
+   - Skimlinks: your publisher ID, like `123456X1234567` (Skimlinks → **Settings → Sites**).
+   - Sovrn Commerce: your site's API key, 32 letters and numbers (Sovrn Commerce → **Settings → Sites**, the key
+     icon).
+3. **ShopMy and LTK**, for creator links. Sign up at [shopmy.us](https://shopmy.us/) or
+   [company.shopltk.com](https://company.shopltk.com/). Make the link for a product in their app, then paste it
+   into the add box: on **Today** (**Add a wish**), behind the **+** at the top of the screen, or on the **List**
+   tab. It's recognized and saved as that item's own link. For an item that's already on the list, open it and
+   paste the link into **Your link**. An item's own link always comes first.
+4. **A brand's own program** on Rakuten, Awin, CJ or Impact, for one brand you buy from a lot. You keep the whole
+   commission there (Skimlinks and Sovrn keep a share). Once the brand approves you, make a deep link to any of its
+   products in the network, paste it under **Teach it a link** and press **Check**, then **Use it for all …
+   links**. From then on every link to that shop goes through your program. Taught shops are listed under **Shops
+   it knows**.
+5. **Check it.** Open any item: under **Your link**, **Visitors go to:** says which link its button uses, with the
+   clicks so far.
+
+Shops that should always get a plain link go under **Never use affiliate links for**, one per line. **Use
+affiliate links on the site** switches everything off at once (your own links are still used: an item's **Your
+link**, or an affiliate link pasted as its shop link).
+
+**The disclosure is automatic.** While any button uses an affiliate link, a short note appears at the bottom of
+the site and a small **Affiliate link** caption sits under that button. Change the wording under **Disclosure**.
+When Amazon links show, Amazon's required sentence ("As an Amazon Associate I earn from qualifying purchases.")
+is added on its own.
+
+Good to know:
+
+- **Approval takes time.** Every program reviews the site first, which can take a few days or longer. Apply once
+  the site is live with some items on it.
+- **Amazon's 180 days.** Amazon closes the account if it doesn't get 3 qualifying sales in the first 180 days
+  (you can apply again later).
+- **Amazon needs a public site.** Keep **Settings → Visibility** on **Public** or **Hide amounts**. Behind a
+  passcode (**Private**), Amazon can't see it.
+- **Amazon's photos and prices.** Next to your Amazon links, Amazon only allows product photos and prices that come
+  from its own tools, not ones copied off its pages. The Control Room saves a copy of the shop's photo (when you add
+  an item, with **Fetch missing photos** or with the **+ Findom** button) and shows the price from the day you added
+  it. So for each Amazon item whose button carries your tag, open it and **Replace** the photo with one of your own
+  (or **Remove** it), and keep **Settings → Visibility** on **Hide amounts** so no prices show (that hides every
+  amount on the site). If that's too much, skip the tag for Amazon: leave the Amazon tags empty and don't paste
+  Amazon links you made into **Your link**. Amazon's rules change from time to time, so read **Program Policies**
+  in Associates Central before you apply.
+- **Your own purchases usually don't count.** Most programs don't pay commission on things you buy yourself, and
+  Amazon forbids buying through your own links. Commissions come from visitors buying.
+- **Clicks aren't sales.** The Control Room counts button clicks (once per visitor per item per day, for up to 20
+  items a day per visitor, bots ignored). What you actually earned is in each program's own dashboard.
+- **Some shops block automatic lookups** (Farfetch and Amazon often do), so the name, price or photo can come in
+  empty. Type the price in the item, or use the **+ Findom** button on a computer (in **Settings → Affiliate
+  links** and behind the **+**): drag it to your bookmarks bar, then click it on the product page. The Control Room
+  opens with the item filled in, and nothing is saved until you press **Add to the list**. If you were signed out,
+  sign in on the page that opens: the item comes up right after.
+
 ## What's stored where
 
 | What | Where | In Git? |
 |------|-------|---------|
 | Wishlist, ledger, rules, settings | `findom-private/data.json` (next to `public_html`, not web-accessible) | No |
 | Whip counters | `findom-private/whips.json` | No |
+| Clicks on shop buttons (not in the backup file) | `findom-private/clicks.json` | No |
 | Password hash, setup code, sign-in sessions | `findom-private/` | No |
 | Item photos | `public_html/uploads/items/` | No |
 | The site itself (code, fonts, 3D) | `public_html/` | Yes |

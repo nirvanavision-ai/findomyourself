@@ -8,6 +8,7 @@ import { setState, getState, subscribe, startPolling } from './lib/state.js';
 import { startLoop } from './lib/loop.js';
 import { initScroll } from './lib/scroll.js';
 import { prefersReducedMotion } from './lib/motion.js';
+import { trackClicks } from './lib/clicks.js';
 import { sound } from './audio.js';
 import { createLoader } from './ui/loader.js';
 import { initCursor, initButtons } from './ui/cursor.js';
@@ -45,6 +46,7 @@ initWhipUI();
 initReveal();
 initCursor();
 initButtons();
+trackClicks();
 sound.init($('#sound'));
 
 const fonts = loader.track(document.fonts ? document.fonts.ready : Promise.resolve(), 1);

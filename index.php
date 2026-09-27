@@ -72,6 +72,7 @@ if (!has_view_access($s)) {
 /* ───── the site ───── */
 $state = cached_public_state($data);
 $copy = $state['settings']['copy'];
+$affiliateNote = (string)($state['settings']['affiliateNote'] ?? ''); // '' while no button is an affiliate link
 
 $scheme = is_https() ? 'https' : 'http';
 $host = preg_replace('/[^a-z0-9.:-]/i', '', (string)($_SERVER['HTTP_HOST'] ?? 'findomyourself.com'));
@@ -130,6 +131,7 @@ function copy_html(string $key, array $copy, array $state): string
   <link rel="preload" href="assets/fonts/archivo-var.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="modulepreload" href="<?= h(asset('js/main.js')) ?>">
   <link rel="stylesheet" href="<?= h(asset('css/site.css')) ?>">
+  <link rel="stylesheet" href="<?= h(asset('css/chains.css')) ?>">
   <noscript><style>.loader, .cursor { display: none !important; }</style></noscript>
   <script type="module" src="<?= h(asset('js/main.js')) ?>"></script>
 </head>
@@ -316,6 +318,9 @@ function copy_html(string $key, array $copy, array $state): string
       <a href="admin/" rel="nofollow">Control room</a>
     </nav>
   </div>
+  <?php if ($affiliateNote !== ''): ?>
+  <p class="footer__disclosure" id="disclosure" data-copy="affiliateNote"><?= h(fill_copy($affiliateNote, $state)) ?></p>
+  <?php endif; ?>
   <p class="footer__credit"><span>© <?= date('Y') ?> <?= h(preg_replace('/^www\./', '', $host)) ?></span><span>Designed &amp; built with Claude</span></p>
 </footer>
 
@@ -328,7 +333,7 @@ function copy_html(string $key, array $copy, array $state): string
     <p>This site is best with JavaScript on. Here’s the list anyway:</p>
     <ul>
       <?php foreach ($state['items'] as $item): if ($item['status'] !== 'wishing') { continue; } ?>
-      <li><?= h(trim($item['brand'] . ' ' . $item['name'])) ?><?= $item['price'] !== null ? ' · ' . h(number_format((float)$item['price'], 0) . ' ' . $item['currency']) : '' ?><?php if ($item['url']): ?> · <a href="<?= h($item['url']) ?>" rel="noopener noreferrer nofollow">store</a><?php endif; ?></li>
+      <li><?= h(trim($item['brand'] . ' ' . $item['name'])) ?><?= $item['price'] !== null && empty($item['priceMissing']) ? ' · ' . h(number_format((float)$item['price'], 0) . ' ' . $item['currency']) : '' ?><?php if ($item['link']): ?> · <a href="<?= h($item['link']) ?>" rel="<?= $item['affiliate'] ? 'sponsored noopener' : 'noopener noreferrer nofollow' ?>">store</a><?= $item['affiliate'] ? ' (affiliate link)' : '' ?><?php endif; ?></li>
       <?php endforeach; ?>
     </ul>
   </div>

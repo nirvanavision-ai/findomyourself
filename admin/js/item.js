@@ -1,14 +1,15 @@
 /*
- * FINDOM YOURSELF · Control Room: one wishlist item. The editor sheet (photo, details, goal,
- * status), claiming and unclaiming, and every way to get a photo in: upload (shrunk on the
- * device first when it's big), paste, drag and drop, or an image link.
+ * FINDOM YOURSELF · Control Room: one wishlist item. The editor sheet (photo, details, her own
+ * affiliate link and where visitors' button goes, goal, status), claiming and unclaiming, and
+ * every way to get a photo in: upload (shrunk on the device first when it's big), paste, drag
+ * and drop, or an image link.
  *
  * Unsaved edits are kept on this device while the sheet is open, so a reload (or iOS
  * killing the tab in the background) doesn't lose them.
  */
 import {
   h, icon, swap, sig, uid, local, debounce, money, balance, amountInput, parseAmount, currencyName, currencyShort, when, shortDate,
-  hostOf, extractUrl, reducedMotion,
+  plural, hostOf, extractUrl, reducedMotion, keepsFocus, focusLost,
 } from './core.js';
 import { api, upload, store, subscribe } from './api.js';
 import {
@@ -83,11 +84,59 @@ export async function preparePhoto(file) {
 
 const imageFrom = (list) => Array.from(list || []).find((f) => f && (f.type.startsWith('image/') || /\.(heic|heif|jpe?g|png|webp|gif|avif)$/i.test(f.name || '')));
 
+/* ───────────────────────── affiliate links ───────────────────────── */
+
+/** Her own link as typed: a full address is kept exactly (its parameters are the point). */
+const ownLink = (text) => {
+  const s = String(text || '').trim();
+  return /^https?:\/\/\S+$/i.test(s) ? s : extractUrl(s);
+};
+
+/** "Awin", "Amazon": a network's name without "(short link)". */
+const networkName = (network) => String(network || '').replace(/\s*\(.*\)$/, '');
+
+/** "a ShopMy link", "an Awin link", "an LTK link" (initials that start with a vowel sound). */
+const aLink = (network) => `${/^[aeiou]/i.test(network) || /^[FHLMNRSX][A-Z]/.test(network) ? 'an' : 'a'} ${network} link`;
+
+/** The button that teaches a whole shop (or her Amazon tag, or the catch-all) from one link. */
+function suggestionLabel(suggestion) {
+  if (!suggestion) return '';
+  if (suggestion.rule) return `Use ${suggestion.network} for every ${suggestion.domain} link`;
+  if (suggestion.amazon) return `Save ${Object.values(suggestion.amazon)[0]} as your Amazon tag`;
+  if (suggestion.catchAll) return `Use ${suggestion.network} for every other shop`;
+  return '';
+}
+
+/** Offers to learn from a link she pasted; the button gives way to what was set up. */
+function suggestionButton(suggestion, url) {
+  const label = suggestionLabel(suggestion);
+  if (!label) return null;
+  const wrap = h('div', { class: 'learn-offer' });
+  const btn = button(label, { size: 'sm', iconName: 'sparkle', className: 'btn-wrap' });
+  btn.addEventListener('click', (e) => {
+    const follow = keepsFocus(e);
+    busy(btn, async () => {
+      try {
+        const res = await api('affiliate.learn', { url });
+        const done = h('p', { class: 'learn-done', tabindex: '-1' }, icon('check'), `Done: ${res.applied}.`);
+        const lost = follow && focusLost(wrap);
+        wrap.replaceChildren(done);
+        if (lost) done.focus({ preventScroll: true }); // the button it replaced had the keyboard
+        toast(`Learned: ${res.applied}. Visitors go through it from now on.`, { tone: 'gold' });
+      } catch (err) {
+        toastError(err);
+      }
+    });
+  });
+  wrap.append(btn);
+  return wrap;
+}
+
 /* ───────────────────────── the editor ───────────────────────── */
 
 const blankValues = () => ({
   name: '', brand: '', variant: '', category: '', price: '', currency: store.state.settings.baseCurrency,
-  url: '', priority: '2', note: '', status: 'wishing', goal: false,
+  url: '', affiliateUrl: '', priority: '2', note: '', status: 'wishing', goal: false,
 });
 
 /** An item's editable fields as the form holds them (strings). */
@@ -95,14 +144,18 @@ function valuesOf(item, state = store.state) {
   return {
     name: item.name, brand: item.brand, variant: item.variant, category: item.category,
     price: item.price > 0 ? amountInput(item.price) : '', currency: item.currency, url: item.url,
+    affiliateUrl: item.affiliateUrl || '',
     priority: String(item.priority), note: item.note, status: item.status === 'claimed' ? 'claimed' : item.status,
     goal: state.settings.goalId === item.id,
   };
 }
 
 /**
- * Opens the editor. opts: {warnings: [], duplicate: bool, focus: 'price'|'photo'|'name', fromLink: bool}
- * id null = a new item typed in by hand.
+ * Opens the editor. opts: {warnings: [], duplicate: bool, focus: 'price'|'photo'|'name', fromLink: bool,
+ * affiliate: {network, kind, id} (her link was recognized), suggestion + pasted (what that link could teach),
+ * prefill: {field: value} + image + grabbed + sameAs (a new item from the bookmarklet),
+ * photoLink (an image link waiting in the photo box for her Fetch)}.
+ * id null = a new item typed in by hand (or grabbed from a shop page). Returns the sheet.
  */
 export function openItemEditor(id = null, opts = {}) {
   const s0 = store.state;
@@ -116,6 +169,7 @@ export function openItemEditor(id = null, opts = {}) {
   let gone = false;
   let photoBusy = false;
   let photoSig = null;
+  let pendingImage = !id && opts.image ? opts.image : ''; // a grabbed photo, fetched when the new item is saved
   const find = () => (itemId ? store.state.items.find((i) => i.id === itemId) : null);
 
   /* ── controls ── */
@@ -127,6 +181,8 @@ export function openItemEditor(id = null, opts = {}) {
   const currency = h('select', { class: 'input select', 'aria-label': 'Currency' },
     (store.meta.currencies || [base.currency]).map((c) => h('option', { value: c, text: currencyShort(c), title: currencyName(c) })));
   const url = h('input', { class: 'input', type: 'url', inputmode: 'url', placeholder: 'https://…', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', enterkeyhint: 'done' });
+  const mine = h('input', { class: 'input', type: 'url', inputmode: 'url', placeholder: 'https://…', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', enterkeyhint: 'done' });
+  const outBox = h('div', { class: 'span-2 out-box', 'aria-live': 'polite' });
   const priority = segmented({ legend: 'How badly?', options: PRIORITIES, value: base.priority, className: 'seg-fill' });
   const noteIn = textArea({ maxlength: 400, rows: 3, placeholder: 'Size, why you want it, where else it’s sold…' });
   const status = segmented({ legend: 'Status', value: 'wishing', className: 'seg-fill', options: [{ value: 'wishing', label: 'On the list' }, { value: 'archived', label: 'Archived' }] });
@@ -164,7 +220,7 @@ export function openItemEditor(id = null, opts = {}) {
   /* ── reading and writing the form ── */
   const read = () => ({
     name: name.value, brand: brand.value, variant: variant.value, category: category.value, price: price.input.value,
-    currency: currency.value, url: url.value, priority: priority.value, note: noteIn.value,
+    currency: currency.value, url: url.value, affiliateUrl: mine.value, priority: priority.value, note: noteIn.value,
     status: base.status === 'claimed' ? 'claimed' : status.value, goal: goal.input.checked,
   });
   const write = (v) => {
@@ -176,6 +232,7 @@ export function openItemEditor(id = null, opts = {}) {
     currency.value = v.currency;
     price.setCurrency(v.currency);
     url.value = v.url;
+    mine.value = v.affiliateUrl || '';
     priority.value = v.priority;
     noteIn.value = v.note;
     if (v.status !== 'claimed') status.value = v.status;
@@ -186,7 +243,7 @@ export function openItemEditor(id = null, opts = {}) {
   };
   const trimmed = (v) => ({
     ...v, name: v.name.trim(), brand: v.brand.trim(), variant: v.variant.trim(), category: v.category.trim(),
-    url: v.url.trim(), note: v.note.trim(), price: String(parseAmount(v.price) ?? v.price.trim()),
+    url: v.url.trim(), affiliateUrl: String(v.affiliateUrl || '').trim(), note: v.note.trim(), price: String(parseAmount(v.price) ?? v.price.trim()),
   });
   const isDirty = () => sig(trimmed(read())) !== sig(trimmed(base));
 
@@ -195,6 +252,141 @@ export function openItemEditor(id = null, opts = {}) {
     openLink.hidden = !link;
     if (link) openLink.href = link;
     refreshBtn.disabled = !link;
+    syncOut();
+  }
+
+  /* ── where visitors' button goes ── */
+  // Saved links: the server's answer (item.out) and the clicks. Links typed but not saved yet:
+  // asked about half a second after typing stops (affiliate.detect saves nothing).
+  let outKey = null; // the links last asked about
+  let outSig = '';
+  let outSeq = 0;
+
+  function showOut(out, clicks, extra = null) {
+    outBox.classList.remove('is-checking');
+    const next = sig(out, clicks, extra && extra.key);
+    if (next === outSig) return;
+    outSig = next;
+    const parts = [];
+    if (out && out.kind !== 'none') {
+      const safe = /^https?:\/\//i.test(out.url || '');
+      parts.push(h('p', { class: ['out-to', out.affiliate && 'is-affiliate'] },
+        icon(out.affiliate ? 'tag' : 'link'),
+        h('span', { class: 'out-text' }, 'Visitors go to: ', h('strong', { text: out.label }),
+          out.kind === 'plain' ? h('span', { class: 'muted', text: ' (no commission)' }) : null),
+        safe && h('a', { class: 'link-btn', href: out.url, target: '_blank', rel: 'noopener noreferrer', dataset: { key: 'out-open' }, 'aria-label': 'Open where visitors go (new tab)' }, 'Open ', icon('external'))));
+      if (clicks) {
+        parts.push(h('p', { class: 'out-clicks', text: clicks.total ? `${plural(clicks.total, 'click')} · ${clicks.week} this week` : 'No clicks yet' }));
+      }
+    }
+    if (extra) parts.push(extra.node);
+    swap(outBox, parts);
+  }
+
+  const detectOut = debounce(async (key, mineLink, productLink) => {
+    const seq = ++outSeq;
+    const current = find();
+    const clicks = current ? current.clicks : null;
+    try {
+      // With Your link, the server says where the item's button would go (out): a plain link there
+      // (the shop link again, an Amazon product without a tag) goes out like the shop link would.
+      const res = await api('affiliate.detect', mineLink ? { url: mineLink, shopUrl: productLink || '' } : { url: productLink });
+      if (seq !== outSeq || gone) return;
+      const found = res.detected;
+      if (mineLink) {
+        if (res.out && res.out.kind !== 'mine') {
+          showOut(res.out, clicks, { key: `plain:${key}`, node: h('p', { class: 'muted', text: 'That’s a plain shop link, not an affiliate link, so it counts as if Your link were empty. Leave it empty unless you have your own affiliate link for this item.' }) });
+          return;
+        }
+        const network = found && found.network !== 'Short link' ? networkName(found.network) : '';
+        showOut(res.out || { url: mineLink, kind: 'mine', label: network ? `Your link (${network})` : 'Your link', affiliate: true }, clicks);
+        return;
+      }
+      // Her own affiliate or creator link typed as the shop link: it belongs in "Your link". The shop
+      // link inside it (when it has one) takes its place; a creator or short link stays, so Refresh
+      // and the photo lookup can still follow it to the product page.
+      const moveButton = () => button('Move it to Your link', { size: 'sm', iconName: 'down', onclick: (e) => {
+        const follow = keepsFocus(e);
+        mine.value = url.value.trim();
+        if (found.destination) url.value = found.destination;
+        syncLink();
+        syncMissing();
+        saveDraft();
+        if (follow) mine.focus(); // its button is about to go: the keyboard goes where the link went
+      } });
+      if (found && found.kind === 'amazon') {
+        // Her saved tag replaces the one in the link. Without one, the tag in it would be what visitors buy through.
+        if (res.preview && res.preview.kind === 'amazon') {
+          showOut(res.preview, clicks);
+          return;
+        }
+        const strip = found.destination && button('Remove the tag', { size: 'sm', iconName: 'x', onclick: (e) => {
+          const follow = keepsFocus(e);
+          url.value = found.destination;
+          syncLink();
+          syncMissing();
+          saveDraft();
+          if (follow) url.focus();
+        } });
+        const saved = ((store.state.settings.affiliate || {}).amazon || {})[found.marketplace] || '';
+        const learn = res.suggestion && res.suggestion.amazon && !saved ? suggestionButton(res.suggestion, productLink) : null;
+        showOut(null, null, { key: `amazon:${key}`, node: h('div', { class: 'out-move' },
+          h('p', { text: `That link carries the Amazon tag “${found.id}”. If it’s yours, move it to Your link. If it isn’t, remove it.` }),
+          h('div', { class: 'button-row' }, moveButton(), strip), learn) });
+        return;
+      }
+      if (found && found.network === 'Affiliate network' && found.destination) {
+        // A link through a site it doesn't know by name ("…?url=…"): maybe her link, maybe just a redirect.
+        const useShop = button('Use the shop link', { size: 'sm', iconName: 'link', onclick: (e) => {
+          const follow = keepsFocus(e);
+          url.value = found.destination;
+          syncLink();
+          syncMissing();
+          saveDraft();
+          if (follow) url.focus();
+        } });
+        showOut(null, null, { key: `redirect:${key}`, node: h('div', { class: 'out-move' },
+          h('p', { text: `That link goes through ${hostOf(productLink) || 'another site'} before it reaches ${hostOf(found.destination) || 'the shop'}. If it’s your affiliate link, move it to Your link. If not, use the shop link inside it.` }),
+          h('div', { class: 'button-row' }, moveButton(), useShop)) });
+        return;
+      }
+      if (found && found.network !== 'Short link') {
+        // Where it would lead as it stands isn't worth showing: the move is the fix.
+        showOut(null, null, { key: `move:${key}`, node: h('div', { class: 'out-move' }, h('p', { text: `That’s ${aLink(networkName(found.network))}, so it works best as Your link.` }), moveButton()) });
+        return;
+      }
+      showOut(res.preview, clicks);
+    } catch (e) {
+      if (seq !== outSeq || gone) return;
+      if (mineLink) showOut({ url: mineLink, kind: 'mine', label: 'Your link', affiliate: true }, clicks);
+      else showOut(null, null, { key: 'error', node: h('p', { class: 'muted', text: 'Couldn’t check where that link goes right now.' }) });
+    }
+  }, 500);
+
+  function syncOut() {
+    const current = find();
+    const mineText = mine.value.trim();
+    const productText = url.value.trim();
+    if (current && current.out && mineText === (current.affiliateUrl || '') && productText === current.url) {
+      outKey = null;
+      outSeq++;
+      detectOut.cancel();
+      showOut(current.out, current.clicks);
+      return;
+    }
+    const mineLink = mineText ? ownLink(mineText) : '';
+    const productLink = extractUrl(productText);
+    const key = `${mineLink}\n${productLink}`;
+    if (key === outKey) return; // already showing (or asking about) these links
+    outKey = key;
+    outSeq++;
+    if (!mineLink && !productLink) {
+      detectOut.cancel();
+      showOut(null, null);
+      return;
+    }
+    outBox.classList.add('is-checking');
+    detectOut(key, mineLink, productLink);
   }
 
   /** Highlights what's missing (price, photo) and offers one-tap fixes. */
@@ -203,7 +395,7 @@ export function openItemEditor(id = null, opts = {}) {
     const noPrice = !(parseAmount(price.input.value) > 0);
     const noPhoto = !current || !current.image;
     priceField.classList.toggle('is-missing', noPrice);
-    photoBox.classList.toggle('is-missing', noPhoto && !(current && current.imageSource));
+    photoBox.classList.toggle('is-missing', noPhoto && !(current && current.imageSource) && !pendingImage);
     const warnings = (opts.warnings || []).filter((w) => !/already on your list/i.test(w));
     const fixes = [];
     if (noPrice) fixes.push(h('button', { class: 'chip chip-fix', type: 'button', onclick: () => focusField(price.input) }, icon('plus'), 'Add price'));
@@ -239,11 +431,13 @@ export function openItemEditor(id = null, opts = {}) {
   /* ── photo actions ── */
   function renderPhoto(force = false) {
     const current = find();
-    const next = sig(current && current.image, current && current.imageSource, gone);
+    const next = sig(current && current.image, current && current.imageSource, gone, pendingImage);
     if (!force && next === photoSig) return;
     photoSig = next;
     if (current && (current.image || current.imageSource)) {
       tile.replaceChildren(thumb(current, 'xl'));
+    } else if (!current && pendingImage) {
+      tile.replaceChildren(thumb({ imageSource: pendingImage, name: name.value, brand: brand.value }, 'xl'));
     } else {
       tile.replaceChildren(h('span', { class: 'photo-empty' }, icon('image'), h('span', { text: 'No photo' })));
     }
@@ -253,9 +447,17 @@ export function openItemEditor(id = null, opts = {}) {
       button(current && current.image ? 'Replace' : 'Upload', { size: 'sm', kind: current && current.image ? 'ghost' : 'primary', iconName: 'upload', dataset: { key: 'photo-upload' }, onclick: () => pickFile(), disabled: photoBusy || gone }),
       canPaste && button('Paste', { size: 'sm', iconName: 'paste', dataset: { key: 'photo-paste' }, onclick: () => pasteFromClipboard(), disabled: photoBusy || gone }),
       current && current.image && button('Remove', { size: 'sm', kind: 'danger', iconName: 'trash', dataset: { key: 'photo-remove' }, onclick: () => removePhoto(), disabled: photoBusy || gone }));
-    if (current && !current.image && current.imageSource) {
+    // A failed fetch or upload keeps its error on screen (the next attempt clears it) instead of the hint.
+    if (photoMsg.classList.contains('is-error')) return;
+    if (current && !current.image && opts.photoLink) {
+      photoOk(`The photo from ${hostOf(opts.photoLink) || 'the shop page'} is ready: press Fetch to keep it.`);
+      if (!photoLink.value) photoLink.value = opts.photoLink;
+    } else if (current && !current.image && current.imageSource) {
       photoOk(`Showing the photo straight from ${hostOf(current.imageSource) || 'the shop'}. Fetch it to keep a copy that can’t break.`);
       if (!photoLink.value) photoLink.value = current.imageSource;
+    } else if (!current && pendingImage) {
+      photoOk(`The photo from ${hostOf(pendingImage) || 'the shop page'} is fetched when you add the item.`);
+      if (!photoLink.value) photoLink.value = pendingImage;
     }
   }
 
@@ -539,20 +741,32 @@ export function openItemEditor(id = null, opts = {}) {
       url.focus();
       return false;
     }
+    const own = v.affiliateUrl.trim() ? ownLink(v.affiliateUrl) : '';
+    if (v.affiliateUrl.trim() && !own) {
+      showError('Your link doesn’t look right. Paste the full address, starting with https://');
+      mine.focus();
+      return false;
+    }
     const payload = {
       name: v.name.trim(), brand: v.brand.trim(), variant: v.variant.trim(), category: v.category.trim(),
-      price: priceValue, currency: v.currency, url: link, priority: Number(v.priority) || 2, note: v.note.trim(),
+      price: priceValue, currency: v.currency, url: link, affiliateUrl: own, priority: Number(v.priority) || 2, note: v.note.trim(),
     };
     if (itemId) payload.id = itemId;
     if (base.status !== 'claimed') payload.status = v.status;
     if (v.goal !== base.goal) payload.goal = v.goal;
     const wasNew = !itemId;
+    // A new item saved with an image link typed in (or grabbed from the shop page) gets that photo too.
+    // Saving just before an upload or a fetch (keepOpen) leaves the photo to that.
+    const photoUrl = wasNew && !keepOpen ? extractUrl(photoLink.value) : '';
+    if (photoUrl) payload.imageUrl = photoUrl;
     try {
       const res = await busy(saveBtn, () => api('item.save', { item: payload }));
       dropDraft();
       itemId = res.itemId;
+      pendingImage = '';
       const fresh = res.state.items.find((i) => i.id === itemId);
       if (fresh) base = valuesOf(fresh, res.state);
+      if (res.warnings && res.warnings.length) toast(res.warnings[0], { tone: 'error' });
       if (keepOpen) {
         write(base);
         if (fresh) sheet.setTitle(fresh.name, fresh.brand || 'Wishlist');
@@ -608,6 +822,8 @@ export function openItemEditor(id = null, opts = {}) {
       field({ label: 'Link', control: url, className: 'span-2', labelExtra: openLink }),
       h('div', { class: 'span-2 link-tools' }, refreshBtn, h('span', { class: 'field-hint', text: 'Reads the shop page again and offers what it finds.' })),
       h('div', { class: 'span-2' }, inspectBox),
+      field({ label: 'Your link', control: mine, className: 'span-2', hint: 'Optional. Your affiliate or creator link (ShopMy, LTK, Amazon, Awin…). Visitors go through it instead of the shop link.' }),
+      outBox,
       field({ label: 'Category', control: category, className: 'span-2' }),
       h('div', { class: 'span-2' }, priority),
       field({ label: 'Note', control: noteIn, counter: 400, className: 'span-2' })),
@@ -625,12 +841,13 @@ export function openItemEditor(id = null, opts = {}) {
   });
   form.addEventListener('change', () => saveDraft());
   url.addEventListener('input', syncLink);
+  mine.addEventListener('input', syncOut);
   currency.addEventListener('change', () => price.setCurrency(currency.value));
   refreshBtn.addEventListener('click', inspect);
 
   const sheet = new Sheet({
     title: item ? item.name : 'New item',
-    eyebrow: item ? (item.brand || hostOf(item.url) || 'Wishlist') : 'Add by hand',
+    eyebrow: item ? (item.brand || hostOf(item.url) || 'Wishlist') : opts.grabbed ? `From ${hostOf(opts.prefill && opts.prefill.url) || 'a shop page'}` : 'Add by hand',
     size: 'lg',
     className: 'sheet-item',
     onRequestClose: async () => {
@@ -642,6 +859,23 @@ export function openItemEditor(id = null, opts = {}) {
   });
   notices.append(missingBox);
   if (opts.duplicate) notices.prepend(note('info', 'That link is already on your list. Here it is.'));
+  // A pasted affiliate link: say so, and offer to learn the shop (or her Amazon tag) from it.
+  const learn = opts.suggestion && opts.pasted ? suggestionButton(opts.suggestion, opts.pasted) : null;
+  if (opts.affiliate) {
+    notices.append(recognizedNote(opts.affiliate, learn));
+  } else if (learn) {
+    notices.append(note('info', h('p', { text: 'That link can set up the whole shop, not just this item.' }), learn));
+  }
+  if (opts.grabbed) {
+    notices.append(note('info', h('p', { text: 'Filled in from the shop page. Check it over, then add it to the list.' })));
+  }
+  if (opts.sameAs) {
+    // Already there without a photo (the shop blocked the fetch, say): this page's photo can go to it.
+    const other = s0.items.find((i) => i.id === opts.sameAs);
+    const givePhoto = !!(pendingImage && other && !other.image);
+    notices.prepend(note('warn', h('p', { text: givePhoto ? 'Looks like this is already on your list, without a photo.' : 'Looks like this is already on your list.' }),
+      h('button', { class: 'link-btn inline', type: 'button', text: givePhoto ? 'Give it this photo' : 'Open that one instead', onclick: () => openInstead(opts.sameAs, givePhoto ? pendingImage : '') })));
+  }
   sheet.body.append(notices, photoBox, form);
   sheet.foot.append(button('Cancel', { onclick: () => sheet.requestClose() }), saveBtn);
   // Photos pasted anywhere in the sheet (text pastes into fields work as usual).
@@ -662,8 +896,9 @@ export function openItemEditor(id = null, opts = {}) {
   });
 
   /* ── fill in, restoring unsaved edits from this device ── */
-  write(base);
-  const draft = local.get(draftKey(itemId));
+  write(opts.prefill ? { ...base, ...opts.prefill } : base); // prefilled (grabbed) counts as unsaved: only Save adds it
+  const prefillSig = opts.prefill ? sig(trimmed(read())) : null; // as filled in, before she touched it
+  const draft = opts.prefill ? null : local.get(draftKey(itemId));
   if (draft && draft.values && Date.now() - draft.at < DRAFT_DAYS * 86400000 && sig(trimmed({ ...base, ...draft.values })) !== sig(trimmed(base))) {
     write({ ...base, ...draft.values, status: base.status === 'claimed' ? 'claimed' : draft.values.status || base.status });
     const restored = note('info', `Restored your unsaved edits from ${when(new Date(draft.at).toISOString())}. `,
@@ -704,13 +939,67 @@ export function openItemEditor(id = null, opts = {}) {
     if (!photoBusy) renderPhoto();
     renderStatus();
     syncMissing();
+    syncOut(); // clicks, and where the saved links lead now
   });
   sheet.onClosed = () => {
     stop();
     saveDraft.cancel();
+    detectOut.cancel();
     if (openEditor && openEditor.sheet === sheet) openEditor = null;
     rememberOpen(null);
   };
+
+  /**
+   * "Recognized an Amazon Associates link with the tag x-20…": the tag or ID is named, so a link copied
+   * from someone else's page stands out, with a way to take it off when it isn't hers. That's offered
+   * only where the shop link was taken out of it (Amazon's /dp/ link, a network's link to the shop):
+   * otherwise the shop link would still be the same link.
+   */
+  function recognizedNote(found, learnOffer) {
+    const tag = found.kind === 'amazon' ? 'tag' : 'ID';
+    const text = h('p', { text: `Recognized ${aLink(networkName(found.network))}${found.id ? ` with the ${tag} ${found.id}` : ''}. It’s saved as your link, and visitors will go through it. ` });
+    const current = find();
+    const separate = !!current && !!current.url && !!current.affiliateUrl && current.url !== current.affiliateUrl
+      && (found.kind === 'amazon' || (found.kind === 'wrapper' && hostOf(current.url) !== hostOf(current.affiliateUrl)));
+    const box = note('ok', text, learnOffer);
+    if (!separate) return box;
+    const notMine = h('button', { class: 'link-btn inline', type: 'button', text: found.id ? `Not my ${tag}` : 'Not my link' });
+    notMine.addEventListener('click', async (e) => {
+      const follow = keepsFocus(e);
+      notMine.disabled = true;
+      try {
+        const res = await api('item.save', { item: { id: itemId, affiliateUrl: '' } });
+        mine.value = ''; // even with other edits in the form, Save mustn't bring it back
+        syncOut();
+        saveDraft();
+        const now = res.state.items.find((i) => i.id === itemId);
+        const out = now && now.out;
+        const where = out && ['amazon', 'rule', 'network'].includes(out.kind) ? `through ${out.label}` : 'straight to the shop';
+        const done = h('p', { tabindex: '-1', text: `Taken off Your link. Visitors go ${where} instead.` });
+        const lost = follow && focusLost(box);
+        box.replaceWith(note('ok', done));
+        if (lost) done.focus({ preventScroll: true }); // the button it replaced had the keyboard
+      } catch (err) {
+        notMine.disabled = false;
+        toastError(err);
+      }
+    });
+    text.append(notMine);
+    return box;
+  }
+
+  /** Swaps this (unsaved) editor for the item that's already on the list, once this one has closed (photo: ready to fetch into it). */
+  async function openInstead(otherId, photo = '') {
+    const closed = sheet.onClosed;
+    sheet.onClosed = () => {
+      closed();
+      openItemEditor(otherId, photo ? { photoLink: photo, focus: 'photo' } : {});
+    };
+    // Nothing typed since it was filled in from the shop page: nothing to discard, so no asking.
+    if (prefillSig !== null && sig(trimmed(read())) === prefillSig) sheet.close();
+    else await sheet.requestClose();
+    if (!sheet.closed) sheet.onClosed = closed;
+  }
 
   openEditor = { id: itemId, sheet, isDirty: () => !gone && isDirty() };
   rememberOpen(itemId);

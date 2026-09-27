@@ -1,15 +1,16 @@
 /*
- * FINDOM YOURSELF · Control Room: the List tab. Paste a product link (the main event), paste
- * a whole list, filter and search, and the wishlist itself in display order: drag the grip
- * (mouse or finger) or use the arrow buttons/keys to reorder.
+ * FINDOM YOURSELF · Control Room: the List tab. Paste a product link from any shop (the main
+ * event, see add.js), paste a whole list, filter and search, and the wishlist itself in display
+ * order: drag the grip (mouse or finger) or use the arrow buttons/keys to reorder.
  */
 import {
   h, icon, swap, sig, local, money, plural, fold, hostOf, extractUrl, allUrls, reducedMotion,
 } from './core.js';
 import { api, store } from './api.js';
-import { toast, toastError, button, note, thumb, sheetIsOpen } from './ui.js';
+import { toastError, button, thumb, sheetIsOpen } from './ui.js';
 import { openItemEditor } from './item.js';
-import { openBulkImport, fetchPhotos, missingPhotos } from './bulk.js';
+import { fetchPhotos, missingPhotos } from './bulk.js';
+import { addLinkForm, moreRows } from './add.js';
 
 const FILTERS = [
   { key: 'all', label: 'All', test: () => true },
@@ -17,11 +18,6 @@ const FILTERS = [
   { key: 'unlocked', label: 'Unlocked', test: (i) => i.affordable },
   { key: 'claimed', label: 'Claimed', test: (i) => i.status === 'claimed' },
   { key: 'archived', label: 'Archived', test: (i) => i.status === 'archived' },
-];
-const SLOW_STEPS = [
-  [0, 'Fetching the shop page…'],
-  [6000, 'Still talking to the shop. Some are slow…'],
-  [14000, 'Almost there. If the shop won’t talk, I’ll add it from the link anyway.'],
 ];
 
 export function createList() {
@@ -33,131 +29,14 @@ export function createList() {
 
   /* ───── paste a link ───── */
 
-  const linkInput = h('input', {
-    class: 'input input-lg', type: 'url', inputmode: 'url', id: 'paste-link', placeholder: 'https://www.farfetch.com/…',
-    autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', enterkeyhint: 'go',
+  const paste = addLinkForm({
+    label: [h('span', { class: 'card-label', text: 'Add to the list' }), h('span', { class: 'paste-title' }, 'Paste a product ', h('em', { text: 'link' }))],
   });
-  const canReadClipboard = !!(navigator.clipboard && navigator.clipboard.readText);
-  const pasteBtn = canReadClipboard ? button('Paste', { iconName: 'paste', className: 'paste-btn' }) : null;
-  const addBtn = button('Add', { kind: 'primary', type: 'submit', iconName: 'plus', className: 'add-btn' });
-  const status = h('div', { class: 'paste-status', 'aria-live': 'polite' });
-  const offer = h('div', { class: 'paste-offer', hidden: true });
-  const pasteForm = h('form', { class: 'card paste-card', novalidate: true },
-    h('label', { class: 'paste-label', for: 'paste-link' },
-      h('span', { class: 'card-label', text: 'Add to the list' }),
-      h('span', { class: 'paste-title' }, 'Paste a product ', h('em', { text: 'link' }))),
-    h('div', { class: 'paste-row' }, linkInput, h('div', { class: 'paste-buttons' }, pasteBtn, addBtn)),
-    status,
-    offer,
-    h('div', { class: 'paste-more' },
-      moreRow('list', 'Paste a whole list', 'From ChatGPT, Gemini, Notes or a spreadsheet', () => openBulkImport()),
-      moreRow('pencil', 'Add by hand', 'No link? Type it in yourself', () => openItemEditor(null))));
-
-  function moreRow(iconName, title, hint, onclick) {
-    return h('button', { class: 'more-row', type: 'button', onclick },
-      h('span', { class: 'more-icon' }, icon(iconName)),
-      h('span', { class: 'more-text' }, h('span', { class: 'more-title', text: title }), h('span', { class: 'more-hint', text: hint })),
-      icon('next'));
-  }
-
-  let adding = false;
-  async function addLink(raw) {
-    if (adding) return;
-    const url = extractUrl(raw);
-    if (!url) {
-      status.replaceChildren(note('error', 'That doesn’t look like a link. Copy the whole address from the shop, starting with https://'));
-      linkInput.focus();
-      return;
-    }
-    adding = true;
-    linkInput.value = url;
-    linkInput.readOnly = true;
-    addBtn.disabled = true;
-    addBtn.classList.add('is-busy');
-    if (pasteBtn) pasteBtn.disabled = true;
-    offer.hidden = true;
-    const text = h('span');
-    status.replaceChildren(h('div', { class: 'fetching' }, h('span', { class: 'spinner' }), text));
-    const timers = SLOW_STEPS.map(([ms, message]) => setTimeout(() => { text.textContent = message; }, ms));
-    try {
-      const res = await api('item.fromLink', { url });
-      linkInput.value = '';
-      status.replaceChildren();
-      openItemEditor(res.itemId, { warnings: res.warnings || [], duplicate: !!res.duplicate, fromLink: true });
-      if (!res.duplicate && !(res.warnings || []).length) toast('Added to the list. Now go earn it.', { tone: 'gold' }); // otherwise the editor explains
-    } catch (e) {
-      status.replaceChildren(note('error', e.message));
-    } finally {
-      timers.forEach(clearTimeout);
-      adding = false;
-      linkInput.readOnly = false;
-      addBtn.disabled = false;
-      addBtn.classList.remove('is-busy');
-      if (pasteBtn) pasteBtn.disabled = false;
-    }
-  }
-
-  pasteForm.addEventListener('submit', (e) => {
-    e.preventDefault();
-    if (!linkInput.value.trim()) {
-      status.replaceChildren(note('info', 'Paste a link from any shop: Farfetch, SSENSE, the brand’s own site…'));
-      linkInput.focus();
-      return;
-    }
-    addLink(linkInput.value);
-  });
-  linkInput.addEventListener('input', () => {
-    if (status.firstChild && !adding) status.replaceChildren();
-  });
-  // Pasting a whole list into the link box: offer the list importer instead.
-  linkInput.addEventListener('paste', (e) => {
-    const text = (e.clipboardData && e.clipboardData.getData('text')) || '';
-    if (text.split('\n').filter((l) => l.trim()).length > 1) {
-      e.preventDefault();
-      showOffer('list', text);
-    }
-  });
-  if (pasteBtn) {
-    pasteBtn.addEventListener('click', async () => {
-      try {
-        const text = await navigator.clipboard.readText();
-        if (text.split('\n').filter((l) => l.trim()).length > 1) {
-          showOffer('list', text);
-          return;
-        }
-        const url = extractUrl(text);
-        if (!url) {
-          status.replaceChildren(note('info', 'No link on the clipboard. Copy one from the shop first.'));
-          return;
-        }
-        linkInput.value = url;
-        addLink(url);
-      } catch (e) {
-        status.replaceChildren(note('info', 'The browser wouldn’t share the clipboard. Long-press the box and choose Paste.'));
-        linkInput.focus();
-      }
-    });
-  }
-
-  /** "Add this link?" / "Read this as a list?" after a paste outside the box. */
-  function showOffer(kind, payload) {
-    const dismiss = h('button', { class: 'link-btn', type: 'button', text: 'No thanks', onclick: () => { offer.hidden = true; } });
-    if (kind === 'link') {
-      offer.replaceChildren(icon('link'),
-        h('p', null, 'Add this link? ', h('span', { class: 'muted', text: `${hostOf(payload)}${new URL(payload).pathname.slice(0, 40)}…` })),
-        h('div', { class: 'offer-actions' }, button('Add it', { kind: 'primary', size: 'sm', onclick: () => addLink(payload) }), dismiss));
-    } else {
-      const links = allUrls(payload).length;
-      offer.replaceChildren(icon('list'),
-        h('p', null, 'That looks like a whole list', h('span', { class: 'muted', text: links ? ` (${plural(links, 'link')}).` : '.' })),
-        h('div', { class: 'offer-actions' }, button('Read the list', { kind: 'primary', size: 'sm', onclick: () => { offer.hidden = true; openBulkImport(payload); } }), dismiss));
-    }
-    offer.hidden = false;
-  }
+  const pasteForm = h('div', { class: 'card paste-card' }, paste.el, h('div', { class: 'paste-more' }, moreRows()));
 
   // A link pasted anywhere on this tab (not into another box) is offered for adding.
   document.addEventListener('paste', (e) => {
-    if (el.hidden || sheetIsOpen() || adding) return;
+    if (el.hidden || sheetIsOpen() || paste.isBusy()) return;
     const target = e.target;
     if (target && target.closest && target.closest('input, textarea, select, [contenteditable]')) return;
     const text = (e.clipboardData && e.clipboardData.getData('text')) || '';
@@ -165,11 +44,11 @@ export function createList() {
     const lines = text.split('\n').filter((l) => l.trim()).length;
     if (lines > 1 && (allUrls(text).length > 1 || lines > 2)) {
       e.preventDefault();
-      showOffer('list', text);
+      paste.showOffer('list', text);
       pasteForm.scrollIntoView({ block: 'nearest', behavior: reducedMotion() ? 'auto' : 'smooth' });
     } else if (extractUrl(text)) {
       e.preventDefault();
-      showOffer('link', extractUrl(text));
+      paste.showOffer('link', extractUrl(text));
       pasteForm.scrollIntoView({ block: 'nearest', behavior: reducedMotion() ? 'auto' : 'smooth' });
     }
   });
@@ -209,7 +88,7 @@ export function createList() {
   const visible = (s) => {
     const f = FILTERS.find((x) => x.key === filter) || FILTERS[0];
     const q = fold(query.trim());
-    return s.items.filter((i) => f.test(i) && (!q || fold([i.name, i.brand, i.variant, i.category, i.note, hostOf(i.url)].join(' ')).includes(q)));
+    return s.items.filter((i) => f.test(i) && (!q || fold([i.name, i.brand, i.variant, i.category, i.note, hostOf(i.url), hostOf(i.affiliateUrl)].join(' ')).includes(q)));
   };
 
   function renderChips(s) {
@@ -240,6 +119,8 @@ export function createList() {
     else if (!item.image) badges.push(['muted', 'Linked photo']);
     if (item.priceMissing) badges.push(['warn', 'No price']);
     if (item.priority === 3) badges.push(['hot', 'Obsessed']);
+    const out = item.out || null;
+    const clicks = item.clicks && item.clicks.total > 0 ? item.clicks.total : 0;
     const label = [item.brand, item.name].filter(Boolean).join(' ');
     const li = h('li', { class: ['item-row', `is-${item.status}`, item.affordable && 'is-unlocked'], dataset: { id: item.id } });
     const grip = h('button', {
@@ -269,7 +150,12 @@ export function createList() {
             item.status === 'claimed' && item.claimedAmount !== null && Math.abs(item.claimedAmount - item.priceBase) >= 0.01 && h('span', { class: 'muted', text: ` · paid ${money(item.claimedAmount)}` })),
           showProgress && h('span', { class: ['mini-progress', item.affordable && 'is-full'], 'aria-hidden': 'true' },
             h('span', { style: { width: `${Math.round(item.progress * 100)}%` } }))),
-        badges.length ? h('span', { class: 'badges' }, badges.map(([kind, text]) => h('span', { class: `badge badge-${kind}`, text }))) : null),
+        badges.length || (out && out.affiliate) || clicks > 0 ? h('span', { class: 'badges' },
+          badges.map(([kind, text]) => h('span', { class: `badge badge-${kind}`, text })),
+          // Visitors go through an affiliate link: a tiny tag, and how often they clicked.
+          out && out.affiliate && h('span', { class: 'badge badge-aff', title: `Visitors go to: ${out.label}` },
+            icon('tag'), h('span', { 'aria-hidden': 'true', text: 'Aff' }), h('span', { class: 'visually-hidden', text: 'Affiliate link' })),
+          clicks > 0 && h('span', { class: 'badge badge-clicks mono', title: `${plural(item.clicks.week, 'click')} this week` }, plural(clicks, 'click'))) : null),
       h('div', { class: 'order-btns' },
         h('button', {
           class: 'icon-btn order-btn', type: 'button', 'aria-label': `Move ${label} up`, dataset: { key: `up:${item.id}` },
@@ -291,7 +177,7 @@ export function createList() {
     if (!s.items.length) {
       swap(listWrap, h('div', { class: 'empty-state big' },
         h('p', { class: 'empty-line', text: 'Nothing on the list. Suspicious.' }),
-        h('p', { class: 'muted', text: 'Paste a product link above, or a whole list from your notes.' })));
+        h('p', { class: 'muted', text: 'Paste a link from any shop, or a whole list from your notes.' })));
       return;
     }
     if (!items.length) {
@@ -446,6 +332,6 @@ export function createList() {
 
   return {
     el, update, title: 'List',
-    focusPaste: () => linkInput.focus(),
+    focusPaste: () => paste.focus(),
   };
 }

@@ -4,7 +4,7 @@ import { getState, subscribe } from '../lib/state.js';
 import { money, moneyExact, signedMoney, hours, receiptTime, itemTitle } from '../lib/format.js';
 import { countTo } from '../lib/motion.js';
 import { progressLine } from './lines.js';
-import { openItem } from './modal.js';
+import { openItem, shopButton } from './modal.js';
 import { sound } from '../audio.js';
 
 const RECEIPT_LINES = 8;
@@ -88,8 +88,10 @@ function renderGoal(s) {
     ),
     el('p', { class: 'goal__line', text: progressLine(g) }),
   );
-  if (g.affordable && g.url) {
-    box.append(el('a', { class: 'btn btn--gold btn--small goal__cta', href: g.url, target: '_blank', rel: 'noopener noreferrer nofollow' }, `Shop it at ${g.store || 'the store'} ↗`));
+  if (g.affordable && g.link) {
+    const cta = shopButton(g, { class: 'btn btn--gold btn--small' }, `Shop it at ${g.store || 'the store'} ↗`);
+    cta.classList.add('goal__cta'); // on the caption's wrapper when there is one
+    box.append(cta);
   }
 }
 

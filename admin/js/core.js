@@ -72,6 +72,20 @@ export function swap(container, ...children) {
   }
 }
 
+/**
+ * For a one-tap fix whose button goes away: whether the keyboard should follow it somewhere. The
+ * button had focus, and it wasn't a tap on a touch screen (focusing a field there would pop the
+ * on-screen keyboard up). Read it in the click handler, before anything is awaited.
+ */
+export const keepsFocus = (e) => document.activeElement === e.currentTarget
+  && (e.detail === 0 || !window.matchMedia('(pointer: coarse)').matches);
+
+/** Whether nothing else has the keyboard: it fell to the page (a focused button disappeared), or it's still inside `within`. */
+export function focusLost(within) {
+  const active = document.activeElement;
+  return !active || active === document.body || !active.isConnected || within.contains(active);
+}
+
 let uidCounter = 0;
 export const uid = (prefix = 'f') => `${prefix}-${++uidCounter}`;
 
@@ -152,6 +166,7 @@ const ICONS = {
   list: ['M9 6.5h11', 'M9 12h11', 'M9 17.5h11', { c: [4.8, 6.5, 1.1], f: 1 }, { c: [4.8, 12, 1.1], f: 1 }, { c: [4.8, 17.5, 1.1], f: 1 }],
   arrange: ['M8 4.5v15', 'M4.5 8L8 4.5 11.5 8', 'M16 19.5v-15', 'M12.5 16l3.5 3.5 3.5-3.5'],
   logout: ['M14.5 4.5H18a1.5 1.5 0 0 1 1.5 1.5v12a1.5 1.5 0 0 1-1.5 1.5h-3.5', 'M10 16.5L5.5 12 10 7.5', 'M5.5 12h10'],
+  tag: ['M3.8 12.4V5.1a1.3 1.3 0 0 1 1.3-1.3h7.3l7.9 7.9a1.3 1.3 0 0 1 0 1.8l-7.3 7.3a1.3 1.3 0 0 1-1.8 0z', { c: [8.3, 8.3, 1.5] }],
 };
 
 export function icon(name, className = '') {

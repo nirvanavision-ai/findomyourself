@@ -3,8 +3,8 @@
  * FINDOM YOURSELF: the data model.
  *
  * data.json holds everything the site knows:
- *   settings  site words, voice lines, hourly rate, currencies, visibility
- *   items     the wishlist, in display order
+ *   settings  site words, voice lines, hourly rate, currencies, visibility, affiliate links
+ *   items     the wishlist, in display order (each with its shop link and, optionally, her own link)
  *   commands  one-tap tasks that pay tribute ("Gym session +$15")
  *   fines     one-tap penalties ("Doomscrolled an hour −$10")
  *   ledger    every tribute, fine and purchase, newest first
@@ -49,8 +49,12 @@ const COPY_FIELDS = [
     'whipIntro' => 320,
     'footerLine' => 120,
     'finePrint' => 600,
+    'affiliateNote' => 300,
 ];
 const VOICE_MOODS = ['taunts', 'working', 'slacking', 'praise', 'unlocked', 'empty'];
+
+// After the constants above: affiliate.php loads fetch.php, which may use them.
+require_once __DIR__ . '/affiliate.php';
 
 /* ───────────────────────── load + save ───────────────────────── */
 
@@ -215,6 +219,7 @@ function normalize_settings(array $in): array
             $out[$key] = (bool)$in[$key];
         }
     }
+    $out['affiliate'] = normalize_affiliate($in['affiliate'] ?? []);
 
     $copy = is_array($in['copy'] ?? null) ? $in['copy'] : [];
     foreach (COPY_FIELDS as $key => $max) {
@@ -256,6 +261,23 @@ function normalize_item($raw, array $settings): ?array
     }
     $priority = (int)($raw['priority'] ?? 2);
     $status = in_array($raw['status'] ?? '', ITEM_STATUSES, true) ? $raw['status'] : 'wishing';
+    // A shop link saved through Google's or a social site's redirect (older versions kept those) is the link inside it.
+    $url = clean_url(unwrap_google_link(is_string($raw['url'] ?? null) ? $raw['url'] : ''));
+    $imageSource = clean_url($raw['imageSource'] ?? '');
+    // What the photo fetch remembers (null until there's something): whether the item has ever had
+    // a stored photo (had), and how often its photo was looked for at its current link (tries, the
+    // last one at "at"; "for" tells a new link, which starts afresh). The Control Room's automatic
+    // fetch leaves alone items that had a photo (a removed photo stays removed) and tries each link
+    // three times at most, a day apart (see photo_fetch_wanted in admin/api.php).
+    $fetch = is_array($raw['imageFetch'] ?? null) ? $raw['imageFetch'] : [];
+    $for = image_fetch_key($url, $imageSource);
+    $same = ($fetch['for'] ?? null) === $for;
+    $fetch = [
+        'at' => $same ? clean_iso($fetch['at'] ?? null) : null,
+        'tries' => $same ? max(0, min(99, (int)($fetch['tries'] ?? 0))) : 0,
+        'had' => $image !== '' || ($fetch['had'] ?? false) === true,
+        'for' => $for,
+    ];
     return [
         'id' => valid_id($raw['id'] ?? null) ? $raw['id'] : new_id('i'),
         'name' => $name,
@@ -264,15 +286,23 @@ function normalize_item($raw, array $settings): ?array
         'category' => clean_text($raw['category'] ?? '', 60),
         'price' => max(0.0, min((float)MAX_AMOUNT, money($raw['price'] ?? 0))),
         'currency' => $currency,
-        'url' => clean_url($raw['url'] ?? ''),
+        'url' => $url,
+        'affiliateUrl' => clean_url($raw['affiliateUrl'] ?? ''), // her own link, kept exactly (its parameters are the point)
         'image' => $image,
-        'imageSource' => clean_url($raw['imageSource'] ?? ''),
+        'imageSource' => $imageSource,
+        'imageFetch' => ($fetch['at'] !== null || $fetch['had']) ? $fetch : null,
         'priority' => max(1, min(3, $priority)),
         'note' => clean_text($raw['note'] ?? '', 400, true),
         'status' => $status,
         'createdAt' => clean_iso($raw['createdAt'] ?? null) ?? iso_now(),
         'claimedAt' => $status === 'claimed' ? (clean_iso($raw['claimedAt'] ?? null) ?? iso_now()) : null,
     ];
+}
+
+/** Which links an item's photo was looked for at (see imageFetch in normalize_item). */
+function image_fetch_key(string $url, string $imageSource): string
+{
+    return hash('crc32b', $url . ' ' . $imageSource);
 }
 
 /** Commands and fines share a shape: {id, name, emoji, amount}. */
@@ -575,7 +605,11 @@ function public_state(array $data): array
     $views = item_views($data, $stats['balance']);
     $hide = $s['visibility'] === 'hide-amounts';
 
-    $items = array_map(function ($v) use ($hide) {
+    $outbounds = [];
+    $items = array_map(function ($v) use ($hide, $s, &$outbounds) {
+        // Visitors only ever get the link their button opens (the affiliate one when there is one).
+        $link = resolve_outbound($v, $s);
+        $outbounds[] = $link;
         $out = [
             'id' => $v['id'],
             'name' => $v['name'],
@@ -586,8 +620,9 @@ function public_state(array $data): array
             'currency' => $v['currency'],
             'priceBase' => $hide ? null : $v['priceBase'],
             'priceMissing' => $v['priceMissing'],
-            'url' => $v['url'],
-            'store' => store_name($v['url']),
+            'link' => $link['url'],
+            'affiliate' => $link['affiliate'],
+            'store' => item_store($v),
             'image' => $v['image'], // only photos stored here: visitors' browsers never call other sites
             'priority' => $v['priority'],
             'note' => $v['note'],
@@ -631,6 +666,11 @@ function public_state(array $data): array
         $session = ['startedAt' => $data['session']['startedAt'], 'label' => $data['session']['label']];
     }
 
+    // The disclosure shows only while affiliate links are in use; the copy carries the finished text too.
+    $note = affiliate_note($outbounds, $s);
+    $copy = $s['copy'];
+    $copy['affiliateNote'] = $note;
+
     return [
         'settings' => [
             'title' => $s['title'],
@@ -641,7 +681,8 @@ function public_state(array $data): array
             'amountsHidden' => $hide,
             'whip' => $s['whip'],
             'showLedger' => $s['showLedger'],
-            'copy' => $s['copy'],
+            'affiliateNote' => $note,
+            'copy' => $copy,
             'voice' => $s['voice'],
         ],
         'stats' => $stats,
@@ -667,6 +708,9 @@ function store_name(string $url): string
     if ($host === '') {
         return '';
     }
+    if (in_array($host, ['a.co', 'amzn.to', 'amzn.eu', 'amzn.asia'], true)) { // Amazon's short links
+        return 'Amazon';
+    }
     $host = preg_replace('/^(www|shop|store|m|us|uk|eu)\./', '', $host);
     $known = [
         'farfetch' => 'Farfetch', 'amiri' => 'AMIRI', 'ssense' => 'SSENSE', 'net-a-porter' => 'Net-a-Porter',
@@ -680,6 +724,12 @@ function store_name(string $url): string
         'transparentspeaker' => 'Transparent', 'transparent' => 'Transparent', 'hermes' => 'Hermès',
         'louisvuitton' => 'Louis Vuitton', 'dior' => 'Dior', 'chanel' => 'Chanel', 'gucci' => 'Gucci',
         'prada' => 'Prada', 'balenciaga' => 'Balenciaga', 'bottegaveneta' => 'Bottega Veneta', 'ysl' => 'Saint Laurent',
+        'amzn' => 'Amazon', 'ulta' => 'Ulta Beauty', 'shopmy' => 'ShopMy', 'shop-links' => 'ShopMy', 'liketk' => 'LTK',
+        'shopltk' => 'LTK', 'rstyle' => 'LTK', 'geni' => 'Geniuslink', 'howl' => 'Howl', 'bit' => 'Bitly',
+        'tinyurl' => 'TinyURL', 'hm' => 'H&M', 'jcrew' => 'J.Crew', 'bloomingdales' => 'Bloomingdale’s',
+        'macys' => 'Macy’s', 'asos' => 'ASOS', 'nordstromrack' => 'Nordstrom Rack', 'saksoff5th' => 'Saks Off 5th',
+        'modaoperandi' => 'Moda Operandi', 'cettire' => 'Cettire', 'bestbuy' => 'Best Buy', 'miumiu' => 'Miu Miu',
+        'maisonmargiela' => 'Maison Margiela', 'dolcegabbana' => 'Dolce & Gabbana', 'skims' => 'SKIMS',
     ];
     $labels = explode('.', (string)$host);
     $name = count($labels) >= 2 ? $labels[count($labels) - 2] : $labels[0];

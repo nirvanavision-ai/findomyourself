@@ -1,15 +1,17 @@
 /*
  * FINDOM YOURSELF · Control Room: the Settings tab. The words on the site, the voice lines,
- * money and exchange rates, time zone, who can see what, the password, and backups.
- * Everything except the password and backups waits in a draft until "Save changes".
+ * money and exchange rates, time zone, who can see what, the password, affiliate links, and
+ * backups. Everything except the password, backups, teaching a link and deleting what it
+ * learned waits in a draft until "Save changes".
  */
 import {
-  h, icon, swap, sig, money, currencyName, fullDateTime, deviceTimezone, plural, reducedMotion,
+  h, icon, swap, sig, uid, money, currencyName, fullDateTime, deviceTimezone, plural, hostOf, extractUrl, reducedMotion, keepsFocus, focusLost,
 } from './core.js';
 import { api, store, downloadBackup } from './api.js';
 import {
   field, textInput, textArea, segmented, toggle, toast, toastError, button, busy, note, saveBar, confirmSheet,
 } from './ui.js';
+import { bookmarkletLink } from './grab.js';
 
 const COPY_LABELS = {
   heroKicker: ['Hero kicker', 'The small line above the big headline.'],
@@ -50,7 +52,22 @@ const VISIBILITY = [
   { value: 'hide-amounts', label: 'Hide amounts', hint: 'The list and progress show, the money figures don’t.' },
   { value: 'private', label: 'Private', hint: 'Only people with the passcode get in.' },
 ];
+const OWN_CARD_COPY = ['affiliateNote']; // copy fields edited in their own card, not under Site words
+const NETWORKS = [{ value: 'none', label: 'Off' }, { value: 'skimlinks', label: 'Skimlinks' }, { value: 'sovrn', label: 'Sovrn' }];
+const NETWORK_IDS = {
+  skimlinks: ['Skimlinks publisher ID', 'Your publisher ID, like 123456X1234567 (Skimlinks → Settings → Sites).', '123456X1234567'],
+  sovrn: ['Sovrn Commerce API key', 'Your site’s API key (Sovrn Commerce → Settings → Sites, key icon).', '32 letters and numbers'],
+};
+const SIGN_UP = [
+  ['Amazon Associates', 'https://affiliate-program.amazon.com/', 'Amazon links. A tag per country.'],
+  ['Skimlinks', 'https://skimlinks.com/', 'One ID for most other shops.'],
+  ['Sovrn Commerce', 'https://www.sovrn.com/commerce/', 'Same idea as Skimlinks: pick one.'],
+  ['ShopMy', 'https://shopmy.us/', 'Fashion creator links, made in their app.'],
+  ['LTK', 'https://company.shopltk.com/', 'Creator links, made in their app.'],
+];
 const lines = (text) => String(text || '').split('\n').map((l) => l.trim()).filter(Boolean);
+const domainList = (text) => String(text || '').split(/[\s,]+/).map((d) => d.trim().toLowerCase()).filter(Boolean);
+const networkName = (network) => String(network || '').replace(/\s*\(.*\)$/, '');
 const rate = (v) => {
   const n = Number(String(v).trim().replace(',', '.'));
   return Number.isFinite(n) && n > 0 && n < 100000 ? n : null;
@@ -58,10 +75,22 @@ const rate = (v) => {
 
 export function createSettings() {
   const meta = store.meta;
+  const markets = meta.amazonMarketplaces || { com: 'amazon.com (US)' };
   let draft = null;
   let savedSig = '';
   let stateSig = '';
 
+  /** The affiliate settings as the form holds them (a tag box for every Amazon store). */
+  const affFrom = (s) => {
+    const a = s.settings.affiliate || {};
+    return {
+      enabled: a.enabled !== false,
+      amazon: Object.fromEntries(Object.keys(markets).map((m) => [m, (a.amazon && a.amazon[m]) || ''])),
+      network: a.network || 'none',
+      networkId: a.networkId || '',
+      exclude: (a.exclude || []).join('\n'),
+    };
+  };
   const fromState = (s) => ({
     title: s.settings.title,
     tagline: s.settings.tagline,
@@ -76,6 +105,7 @@ export function createSettings() {
     showLedger: s.settings.showLedger,
     whip: s.settings.whip,
     goalId: s.settings.goalId,
+    affiliate: affFrom(s),
   });
   const comparable = (d) => ({
     ...d,
@@ -84,6 +114,13 @@ export function createSettings() {
     copy: Object.fromEntries(Object.entries(d.copy).map(([k, v]) => [k, String(v).trim()])),
     voice: Object.fromEntries(Object.entries(d.voice).map(([k, v]) => [k, lines(v)])),
     fx: Object.fromEntries(Object.entries(d.fx).filter(([, v]) => String(v).trim() !== '').map(([k, v]) => [k, rate(v) ?? v])),
+    affiliate: {
+      enabled: d.affiliate.enabled,
+      amazon: Object.fromEntries(Object.entries(d.affiliate.amazon).map(([k, v]) => [k, String(v).trim()]).filter(([, v]) => v)),
+      network: d.affiliate.network,
+      networkId: d.affiliate.network === 'none' ? '' : d.affiliate.networkId.trim(),
+      exclude: domainList(d.affiliate.exclude),
+    },
   });
   const isDirty = () => !!draft && sig(comparable(draft)) !== savedSig;
   const bar = saveBar({ onSave: save, onDiscard: () => fill(store.state) });
@@ -119,7 +156,7 @@ export function createSettings() {
       return field({ label, control: input, hint, counter: max });
     })));
   // Any copy fields added on the server later still get a box.
-  const extra = Object.keys(meta.copyFields).filter((k) => !COPY_GROUPS.some(([, keys]) => keys.includes(k)));
+  const extra = Object.keys(meta.copyFields).filter((k) => !OWN_CARD_COPY.includes(k) && !COPY_GROUPS.some(([, keys]) => keys.includes(k)));
   if (extra.length) {
     copyGroups.push(h('fieldset', { class: 'copy-group' }, h('legend', { class: 'group-label', text: 'More' }), extra.map((key) => {
       const input = textArea({ maxlength: meta.copyFields[key], rows: 2 });
@@ -355,6 +392,307 @@ export function createSettings() {
   const accountCard = h('section', { class: 'card', 'aria-labelledby': 'account-title' },
     h('div', { class: 'card-head' }, h('h2', { class: 'card-label', id: 'account-title', text: 'Password' })), pwForm);
 
+  /* ───── affiliate links ───── */
+
+  const affToggle = toggle({
+    label: 'Use affiliate links on the site',
+    hint: 'Off: buttons go straight to the shop. Your own links are still used: an item’s “Your link”, or an affiliate link pasted as its shop link.',
+    onChange: (v) => { draft.affiliate.enabled = v; sync(); },
+  });
+  const clicksAside = h('span', { class: 'card-aside mono' });
+
+  // Amazon: a tag per store. amazon.com up front, the other countries folded away.
+  const amazonIns = {};
+  const amazonInput = (market) => {
+    const input = textInput({ class: 'input mono', maxlength: 40, autocapitalize: 'off', spellcheck: 'false', placeholder: market === 'com' ? 'yourname-20' : '' });
+    amazonIns[market] = input;
+    input.addEventListener('input', () => {
+      draft.affiliate.amazon[market] = input.value;
+      syncMarkets();
+      sync();
+    });
+    return input;
+  };
+  const otherMarkets = Object.keys(markets).filter((m) => m !== 'com');
+  const otherSummary = h('span', { text: 'Other Amazon stores' });
+  const amazonGroup = h('fieldset', { class: 'copy-group' },
+    h('legend', { class: 'group-label', text: 'Amazon Associates' }),
+    field({ label: `Tag for ${markets.com || 'amazon.com (US)'}`, control: amazonInput('com'), hint: 'Your tracking ID from Amazon Associates, like yourname-20.' }),
+    otherMarkets.length ? h('details', { class: 'placeholders aff-markets' },
+      h('summary', { class: 'disclosure' }, otherSummary),
+      h('div', { class: 'market-rows' }, otherMarkets.map((m) => field({ label: markets[m], control: amazonInput(m) })))) : null);
+  const syncMarkets = () => {
+    const set = otherMarkets.filter((m) => String(draft.affiliate.amazon[m] || '').trim()).length;
+    otherSummary.textContent = set ? `Other Amazon stores (${set} set)` : 'Other Amazon stores';
+  };
+
+  // Everything else: one catch-all network ID.
+  const netSeg = segmented({
+    legend: 'Catch-all network', hideLegend: true, options: NETWORKS, value: 'none', className: 'seg-fill',
+    onChange: (v) => { draft.affiliate.network = v; syncNetwork(); sync(); },
+  });
+  const netId = textInput({ class: 'input mono', maxlength: 64, autocapitalize: 'off', spellcheck: 'false' });
+  netId.addEventListener('input', () => { draft.affiliate.networkId = netId.value; sync(); });
+  const netIdField = field({ label: NETWORK_IDS.skimlinks[0], control: netId, hint: NETWORK_IDS.skimlinks[1] });
+  function syncNetwork() {
+    const [label, hint, placeholder] = NETWORK_IDS[draft.affiliate.network] || NETWORK_IDS.skimlinks;
+    netIdField.hidden = draft.affiliate.network === 'none';
+    netIdField.querySelector('.field-label span').textContent = label;
+    netIdField.querySelector('.field-hint').textContent = hint;
+    netId.placeholder = placeholder;
+  }
+  const networkGroup = h('fieldset', { class: 'copy-group' },
+    h('legend', { class: 'group-label', text: 'Everything else, automatically' }),
+    h('p', { class: 'field-hint', text: 'One ID turns links to about 50,000 shops (Gucci, Farfetch, Net-a-Porter, SSENSE, Nordstrom…) into affiliate links. Shops without a program still just work. Amazon never goes through these.' }),
+    netSeg, netIdField);
+
+  // Teach it a link: one deep link she made becomes the rule for that whole shop.
+  const teachIn = h('input', {
+    class: 'input', type: 'url', inputmode: 'url', id: uid('teach'), placeholder: 'Paste an affiliate link you made (Awin, Rakuten, CJ, Impact…)',
+    autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', enterkeyhint: 'go',
+  });
+  const teachBtn = button('Check', { type: 'submit', iconName: 'search' });
+  const teachResult = h('div', { class: 'teach-result', 'aria-live': 'polite' });
+  const teachForm = h('form', { class: 'teach-form', novalidate: true },
+    h('label', { class: 'visually-hidden', for: teachIn.id, text: 'An affiliate link you made' }),
+    h('div', { class: 'teach-row' }, teachIn, teachBtn),
+    h('p', { class: 'field-hint', text: 'Make a deep link to any product in your network and paste it here. It learns the pattern and uses it for every link to that shop.' }));
+  teachIn.addEventListener('input', () => { if (teachResult.firstChild) teachResult.replaceChildren(); });
+  teachForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const raw = teachIn.value.trim();
+    const link = /^https?:\/\/\S+$/i.test(raw) ? raw : extractUrl(raw);
+    if (!link) {
+      teachResult.replaceChildren(note('error', 'Paste the whole link, starting with https://'));
+      teachIn.focus();
+      return;
+    }
+    await busy(teachBtn, async () => {
+      try {
+        showTeach(await api('affiliate.detect', { url: link }), link);
+      } catch (err) {
+        teachResult.replaceChildren(note('error', err.message));
+      }
+    }, 'Checking…');
+  });
+
+  /** What a checked link is, where that shop's visitors go now, and what it could learn. */
+  function showTeach(res, link) {
+    const found = res.detected;
+    const learn = res.suggestion;
+    const network = found ? networkName(found.network) : '';
+    const shop = (learn && learn.domain) || (found ? hostOf(found.destination) : hostOf(link));
+    const plainShort = !!found && found.network === 'Short link'; // bit.ly and co: no network of its own
+    let title;
+    if (!found) title = `A plain link to ${shop || 'a shop'}, not an affiliate link`;
+    else if (found.kind === 'amazon') title = `Amazon link with the tag ${found.id}`;
+    else if (found.kind === 'wrapper' && shop) title = `${network} link for ${shop}`;
+    else if (plainShort) title = 'A short link';
+    else title = `${network} link`;
+    const body = [h('p', { class: 'teach-title', text: title })];
+    const preview = res.preview;
+    if (preview && preview.kind !== 'none' && shop && !(found && ['creator', 'short'].includes(found.kind))) {
+      body.push(h('p', { class: 'muted' }, `Right now, visitors going to ${shop} get: `, h('strong', { text: preview.label }), '.'));
+    }
+    let tone = 'info';
+    const known = learn ? learned(learn) : null;
+    if (known === 'same') {
+      tone = 'ok';
+      body.push(h('p', { text: 'Already set up that way. Nothing to change.' }));
+    } else if (known === 'excluded') {
+      body.push(h('p', { text: `${learn.domain} is on your “Never use affiliate links for” list, so its buttons stay plain links. Take it off that list first.` }));
+    } else if (learn) {
+      tone = 'ok';
+      const instead = known === 'other' ? ' instead' : ''; // it replaces what's there for that shop, store or catch-all
+      const label = learn.rule ? `Use it for all ${learn.domain} links${instead}`
+        : learn.amazon ? `Save ${Object.values(learn.amazon)[0]} as your Amazon tag${instead}` : `Use ${network} for every other shop${instead}`;
+      const use = button(label, { kind: 'primary', size: 'sm', iconName: 'sparkle', className: 'btn-wrap' });
+      use.addEventListener('click', (e) => {
+        const follow = keepsFocus(e);
+        busy(use, async () => {
+          try {
+            const done = await api('affiliate.learn', { url: link });
+            teachIn.value = '';
+            const msg = note('ok', h('p', { text: `Learned: ${done.applied}. Visitors go through it from now on.` }));
+            msg.tabIndex = -1;
+            const lost = follow && focusLost(teachResult);
+            teachResult.replaceChildren(msg);
+            if (lost) msg.focus({ preventScroll: true }); // the button it replaced had the keyboard
+            toast(`Learned: ${done.applied}.`, { tone: 'gold' });
+          } catch (err) {
+            teachResult.replaceChildren(note('error', err.message));
+          }
+        });
+      });
+      body.push(h('div', { class: 'button-row learn-row' }, use));
+    } else if (plainShort) {
+      body.push(h('p', { text: 'A short link hides the shop it leads to, so there’s no pattern to learn. If it’s your link for one product, paste it into that item’s “Your link”.' }));
+    } else if (found && ['creator', 'short'].includes(found.kind)) {
+      body.push(h('p', { text: 'Links like this are made for one product, so there’s no pattern to learn. Paste it into that item’s “Your link” instead.' }));
+    } else if (!found) {
+      body.push(h('p', { text: 'Paste a link you made in your affiliate network: it has the shop’s link inside it.' }));
+    } else {
+      body.push(h('p', { text: 'There’s nothing to learn from this one. Make a deep link to a product page and paste that.' }));
+    }
+    teachResult.replaceChildren(note(tone, body));
+  }
+
+  /**
+   * What learning would do to the saved settings: 'same' (nothing), 'other' (replace a tag, rule or ID),
+   * 'excluded' (a rule for a shop she said never to use), or null (add).
+   */
+  function learned(learn) {
+    const a = store.state.settings.affiliate || {};
+    if (learn.amazon) {
+      const [market, tag] = Object.entries(learn.amazon)[0] || [];
+      const now = (a.amazon && a.amazon[market]) || '';
+      return now === tag ? 'same' : now ? 'other' : null;
+    }
+    if (learn.catchAll) {
+      if (a.network === learn.catchAll.network && a.networkId === learn.catchAll.networkId) return 'same';
+      return a.network && a.network !== 'none' ? 'other' : null;
+    }
+    if (learn.rule) {
+      // Matched like the server does: a shop's domain or any subdomain of it, and the first rule that matches wins.
+      const covers = (d) => learn.domain === d || learn.domain.endsWith(`.${d}`);
+      if ((a.exclude || []).some(covers)) return 'excluded';
+      const rule = (a.rules || []).find((r) => r.domains.some(covers));
+      if (!rule) return null;
+      return rule.mode === learn.rule.mode && rule.value === learn.rule.value ? 'same' : 'other';
+    }
+    return null;
+  }
+
+  // What it has learned, shop by shop. Deleting one saves straight away (with an undo).
+  const rulesBox = h('div', { class: 'aff-rules', tabindex: '-1' }); // takes the keyboard when the last rule is deleted
+  let rulesSig = '';
+  function renderRules(s) {
+    const rules = (s.settings.affiliate && s.settings.affiliate.rules) || [];
+    const next = sig(rules);
+    if (next === rulesSig) return;
+    rulesSig = next;
+    if (!rules.length) {
+      swap(rulesBox, h('p', { class: 'field-hint', text: 'No shops taught yet.' }));
+      return;
+    }
+    swap(rulesBox,
+      h('p', { class: 'field-label', text: 'Shops it knows' }),
+      h('ul', { class: 'aff-rule-list' }, rules.map((rule) => h('li', { class: 'aff-rule' },
+        h('span', { class: 'aff-rule-text' },
+          h('span', { class: 'aff-rule-label', text: rule.label }),
+          h('span', { class: 'aff-rule-meta', text: `${rule.domains.join(', ')} · ${rule.mode === 'wrap' ? 'deep link' : 'extra parameters'}` })),
+        h('button', {
+          class: 'icon-btn danger', type: 'button', 'aria-label': `Delete ${rule.label}`, title: 'Delete', dataset: { key: `rule-del:${rule.id}` },
+          onclick: (e) => deleteRule(rule, e.currentTarget, keepsFocus(e)),
+        }, icon('trash'))))));
+  }
+  async function deleteRule(rule, btn, follow = false) {
+    const rules = store.state.settings.affiliate.rules;
+    const index = rules.findIndex((r) => r.id === rule.id);
+    const neighbour = rules[index + 1] || rules[index - 1] || null; // gets the keyboard once this one's gone
+    btn.disabled = true;
+    try {
+      await api('settings.save', { settings: { affiliate: { rules: rules.filter((r) => r.id !== rule.id) } } });
+      // The list has been redrawn without it: the keyboard goes to the next rule's delete (or the list).
+      if (follow && focusLost(rulesBox)) {
+        const next = neighbour && rulesBox.querySelector(`[data-key="${CSS.escape(`rule-del:${neighbour.id}`)}"]`);
+        (next || rulesBox).focus({ preventScroll: true });
+      }
+      toast(`Deleted ${rule.label}.`, {
+        action: async () => {
+          const now = store.state.settings.affiliate.rules.filter((r) => r.id !== rule.id);
+          now.splice(Math.min(index, now.length), 0, rule);
+          try {
+            await api('settings.save', { settings: { affiliate: { rules: now } } });
+            toast(`${rule.label} is back.`);
+          } catch (err) {
+            toastError(err);
+          }
+        },
+      });
+    } catch (err) {
+      btn.disabled = false;
+      toastError(err);
+    }
+  }
+  const teachGroup = h('fieldset', { class: 'copy-group' },
+    h('legend', { class: 'group-label', text: 'Teach it a link' }),
+    teachForm, teachResult, rulesBox);
+
+  const excludeIn = textArea({ rows: 3, class: 'input textarea textarea-short', placeholder: 'gucci.com', autocapitalize: 'off', spellcheck: 'false', 'aria-label': 'Never use affiliate links for these shops' });
+  excludeIn.addEventListener('input', () => { draft.affiliate.exclude = excludeIn.value; sync(); });
+  const excludeGroup = h('fieldset', { class: 'copy-group' },
+    h('legend', { class: 'group-label', text: 'Never use affiliate links for' }),
+    excludeIn,
+    h('p', { class: 'field-hint', text: 'Shops’ web addresses, one per line. Their buttons stay plain links, except where an item has your own link (its “Your link”, or an affiliate link pasted as its shop link).' }));
+
+  let disclosureGroup = null;
+  if (meta.copyFields.affiliateNote) {
+    const max = meta.copyFields.affiliateNote;
+    const input = textArea({ maxlength: max, rows: 3, class: 'input textarea textarea-short' });
+    copyInputs.affiliateNote = input; // saved with the other site words
+    bind(input, 'copy', 'affiliateNote');
+    disclosureGroup = h('fieldset', { class: 'copy-group' },
+      h('legend', { class: 'group-label', text: 'Disclosure' }),
+      field({ label: 'Shown at the foot of the site', control: input, counter: max, hint: 'Only while a button uses an affiliate link. Leave it empty to bring back the original words.' }),
+      h('p', { class: 'field-hint', text: '“As an Amazon Associate I earn from qualifying purchases.” is added automatically when Amazon links are used.' }));
+  }
+
+  const signUp = h('div', { class: 'copy-group' },
+    h('h3', { class: 'group-label', text: 'Where to sign up' }),
+    h('ul', { class: 'signup-list' }, SIGN_UP.map(([name, href, what]) => h('li', null,
+      h('a', { href, target: '_blank', rel: 'noopener' }, name, icon('external')),
+      h('span', { class: 'muted', text: what })))));
+  const grabGroup = h('div', { class: 'copy-group grab-group' }, // hidden on touch screens: bookmarks bars are a desktop thing
+    h('h3', { class: 'group-label', text: 'Grab from any shop page' }),
+    bookmarkletLink());
+
+  const affCard = h('section', { class: 'card aff-card', 'aria-labelledby': 'aff-title' },
+    h('div', { class: 'card-head' }, h('h2', { class: 'card-label', id: 'aff-title', text: 'Affiliate links' }), clicksAside),
+    h('p', { class: 'card-lede', text: 'Visitors’ buttons earn you a commission where they can: an item’s own link first, then your Amazon tag, the shops you’ve taught it, and Skimlinks or Sovrn for the rest.' }),
+    h('div', { class: 'stack' },
+      h('div', { class: 'switch-list' }, affToggle),
+      amazonGroup, networkGroup, teachGroup, excludeGroup, disclosureGroup, signUp, grabGroup));
+
+  /** Takes in affiliate changes made elsewhere (a link taught from an item) without touching her edits. */
+  let baseAff = null;
+  function mergeAffiliate(s) {
+    const next = affFrom(s);
+    const d = draft.affiliate;
+    let changed = false;
+    if (d.enabled === baseAff.enabled && next.enabled !== d.enabled) {
+      d.enabled = next.enabled;
+      affToggle.input.checked = d.enabled;
+      changed = true;
+    }
+    for (const m of Object.keys(next.amazon)) {
+      if (d.amazon[m] === baseAff.amazon[m] && next.amazon[m] !== d.amazon[m]) {
+        d.amazon[m] = next.amazon[m];
+        amazonIns[m].value = d.amazon[m];
+        changed = true;
+      }
+    }
+    if (d.network === baseAff.network && d.networkId === baseAff.networkId && (next.network !== d.network || next.networkId !== d.networkId)) {
+      d.network = next.network;
+      d.networkId = next.networkId;
+      netSeg.value = d.network;
+      netId.value = d.networkId;
+      syncNetwork();
+      changed = true;
+    }
+    if (d.exclude === baseAff.exclude && next.exclude !== d.exclude) {
+      d.exclude = next.exclude;
+      excludeIn.value = d.exclude;
+      changed = true;
+    }
+    baseAff = next;
+    if (changed) {
+      syncMarkets();
+      savedSig = sig(comparable(fromState(s)));
+      sync();
+    }
+  }
+
   /* ───── backup ───── */
 
   const restoreInput = h('input', { type: 'file', accept: '.json,application/json', class: 'visually-hidden', tabindex: '-1', 'aria-hidden': 'true' });
@@ -410,7 +748,7 @@ export function createSettings() {
     h('div', { class: 'button-row' }, downloadBtn, restoreBtn), restoreInput);
 
   // On a phone the page is long: chips jump straight to each card.
-  const sections = [[wordsCard, 'Words'], [voiceCard, 'Voice'], [visCard, 'Visibility'], [moneyCard, 'Money'], [tzCard, 'Time zone'], [accountCard, 'Password'], [backupCard, 'Backup']];
+  const sections = [[wordsCard, 'Words'], [voiceCard, 'Voice'], [visCard, 'Visibility'], [moneyCard, 'Money'], [tzCard, 'Time zone'], [accountCard, 'Password'], [affCard, 'Affiliate links'], [backupCard, 'Backup']];
   const jump = h('nav', { class: 'chips jump-chips', 'aria-label': 'Jump to' }, sections.map(([card, label]) => h('button', {
     class: 'chip', type: 'button', text: label,
     onclick: () => {
@@ -425,11 +763,11 @@ export function createSettings() {
     h('header', { class: 'view-head' },
       h('p', { class: 'eyebrow', text: 'Settings' }),
       h('h1', { class: 'view-title', id: 'settings-title' }, 'The fine ', h('em', { text: 'print' })),
-      h('p', { class: 'view-sub', text: 'Words, voice, money, and who gets to watch.' })),
+      h('p', { class: 'view-sub', text: 'Words, voice, money, affiliate links, and who gets to watch.' })),
     jump,
     h('div', { class: 'settings-grid' },
       h('div', { class: 'col' }, wordsCard, voiceCard),
-      h('div', { class: 'col' }, visCard, moneyCard, tzCard, accountCard, backupCard)),
+      h('div', { class: 'col' }, visCard, moneyCard, tzCard, accountCard, affCard, backupCard)),
     bar.el);
 
   /* ───── filling in and saving ───── */
@@ -463,6 +801,15 @@ export function createSettings() {
     goalSig = '';
     renderGoalOptions(s);
     renderFx(true);
+    affToggle.input.checked = draft.affiliate.enabled;
+    for (const [market, input] of Object.entries(amazonIns)) input.value = draft.affiliate.amazon[market] || '';
+    netSeg.value = draft.affiliate.network;
+    netId.value = draft.affiliate.networkId;
+    excludeIn.value = draft.affiliate.exclude;
+    baseAff = affFrom(s);
+    syncMarkets();
+    syncNetwork();
+    renderRules(s);
     sync();
   }
 
@@ -508,6 +855,22 @@ export function createSettings() {
     for (const key of ['showLive', 'showLedger', 'whip', 'goalId']) {
       if (draft[key] !== saved[key]) patch[key] = draft[key];
     }
+    // Affiliate links: each part that changed is sent whole (the server checks tags and IDs).
+    const nextAff = comparable(draft).affiliate;
+    const savedAff = comparable(saved).affiliate;
+    const affiliate = {};
+    if (nextAff.enabled !== savedAff.enabled) affiliate.enabled = nextAff.enabled;
+    if (sig(nextAff.amazon) !== sig(savedAff.amazon)) affiliate.amazon = nextAff.amazon;
+    if (nextAff.network !== savedAff.network || nextAff.networkId !== savedAff.networkId) {
+      if (nextAff.network !== 'none' && !nextAff.networkId) {
+        netId.focus();
+        throw new Error(`Add your ${meta.affiliateNetworks ? meta.affiliateNetworks[nextAff.network] : 'network'} ID, or switch it off.`);
+      }
+      affiliate.network = nextAff.network;
+      affiliate.networkId = nextAff.networkId;
+    }
+    if (sig(nextAff.exclude) !== sig(savedAff.exclude)) affiliate.exclude = nextAff.exclude;
+    if (Object.keys(affiliate).length) patch.affiliate = affiliate;
     if (!Object.keys(patch).length) {
       fill(s);
       return;
@@ -523,14 +886,19 @@ export function createSettings() {
   }
 
   function update(s) {
-    const next = sig(s.settings, s.items.map((i) => [i.id, i.name, i.brand, i.status, i.currency, i.priceBase]));
+    const next = sig(s.settings, s.items.map((i) => [i.id, i.name, i.brand, i.status, i.currency, i.priceBase]), s.clicksTotal, s.clicksCapped);
     if (next === stateSig) return;
     stateSig = next;
+    // Past the day's limit (a flood of "visitors"), clicks stop being counted until tomorrow.
+    clicksAside.textContent = [s.clicksTotal ? `${plural(s.clicksTotal, 'click')} so far` : '', s.clicksCapped ? 'counting paused for today' : ''].filter(Boolean).join(' · ');
+    clicksAside.title = s.clicksCapped ? 'So many clicks today that counting stopped (daily limit). It starts again tomorrow.' : '';
     if (!draft || !isDirty()) {
       fill(s);
     } else {
       renderGoalOptions(s); // keep the choices current without touching edits
       renderFx();
+      mergeAffiliate(s);
+      renderRules(s);
     }
   }
 

@@ -1,13 +1,14 @@
 /*
  * The wishlist grid. Cards are keyed by item id and updated in place, so the live
- * polling never makes the grid flicker. Locked photos sit behind frosted glass that
- * clears from the bottom up as the vault fills.
+ * polling never makes the grid flicker. Locked photos stay in full view, chained up,
+ * with a padlock whose ring fills as the vault does; the chains snap off on unlock.
  */
-import { $, el, clear, svg, icons } from '../lib/dom.js';
+import { $, el, clear } from '../lib/dom.js';
 import { getState, subscribe } from '../lib/state.js';
 import { money, hours } from '../lib/format.js';
 import { isTouch, prefersReducedMotion } from '../lib/motion.js';
 import { openItem } from './modal.js';
+import { chainOverlay, carryChains, patchChains } from './chains.js';
 
 const FILTERS = [
   ['wishing', 'On the list'],
@@ -17,7 +18,14 @@ const FILTERS = [
 ];
 const view = { filter: 'wishing', category: '', sort: 'closest' };
 const nodes = new Map();
+const photos = new WeakMap(); // card → what its photo area shows (image, state), to tell a new photo from new numbers
 let visibleIds = [];
+// Cards in or near the viewport: only their rings slide on a live update. Each ring that
+// animates restyles every frame, so fifty of them sliding off screen would cost for nothing.
+const onScreen = new Set();
+const viewObserver = new IntersectionObserver((entries) => {
+  for (const entry of entries) onScreen[entry.isIntersecting ? 'add' : 'delete'](entry.target.dataset.id);
+}, { rootMargin: '25% 0px' });
 
 export const listOrder = () => visibleIds;
 
@@ -73,10 +81,12 @@ function render(s) {
   const shown = sorted(inFilter.filter((i) => !view.category || i.category === view.category), view.sort);
   visibleIds = shown.map((i) => i.id);
 
+  const focusedId = grid.contains(document.activeElement) ? document.activeElement.closest('.card')?.dataset.id : null;
   const keep = new Set(visibleIds);
   for (const [id, node] of nodes) {
-    if (!keep.has(id)) { node.remove(); nodes.delete(id); }
+    if (!keep.has(id)) { node.remove(); nodes.delete(id); viewObserver.unobserve(node); onScreen.delete(id); }
   }
+  let cursor = grid.firstElementChild; // where the next card belongs
   shown.forEach((item, index) => {
     const signature = JSON.stringify([item, index, s.settings.baseCurrency]);
     let node = nodes.get(item.id);
@@ -84,17 +94,34 @@ function render(s) {
       node = card(item, index, s);
       node.dataset.sig = signature;
       nodes.set(item.id, node);
+      viewObserver.observe(node);
       enter(node);
+    } else if (node.dataset.sig !== signature && photos.get(node) === photoKey(item)) {
+      patch(node, card(item, index, s), item, onScreen.has(item.id)); // new numbers only: no need to rebuild the photo
+      node.dataset.sig = signature;
     } else if (node.dataset.sig !== signature) {
       const fresh = card(item, index, s);
       fresh.className = node.className;
       fresh.dataset.sig = signature;
+      carryChains(node, fresh, { slide: onScreen.has(item.id) }); // the ring slides to its new value; fresh unlocks snap their chains
+      if (node.classList.contains('is-entering')) { // not scrolled into view yet: watch the replacement instead
+        enterObserver.unobserve(node);
+        enterObserver.observe(fresh);
+      }
+      viewObserver.unobserve(node);
+      viewObserver.observe(fresh);
       node.replaceWith(fresh);
+      if (cursor === node) cursor = fresh;
       nodes.set(item.id, fresh);
       node = fresh;
     }
-    grid.append(node); // (re)appending keeps DOM order in sync with the sort
+    // Keep DOM order in sync with the sort, moving only the cards that change place: a move
+    // re-inserts the card, which restyles its whole subtree (chains included) for nothing.
+    if (node === cursor) cursor = node.nextElementSibling;
+    else grid.insertBefore(node, cursor);
   });
+  // a rebuilt or moved card drops keyboard focus: keyboard users keep their place
+  if (focusedId && !grid.contains(document.activeElement)) nodes.get(focusedId)?.querySelector('.card__hit').focus({ preventScroll: true });
 
   const empty = $('#list-empty');
   empty.hidden = shown.length > 0;
@@ -137,13 +164,9 @@ function card(item, index, s) {
   } else {
     media.append(placeholder(item));
   }
-  if (status === 'locked' || status === 'unpriced') {
-    media.append(el('div', { class: 'card__frost' }, svg(icons.lock)));
-    media.querySelector('.card__frost svg').classList.add('card__lock');
-  }
+  if (status === 'locked' || status === 'unpriced') media.append(chainOverlay({ progress: item.progress, unpriced: status === 'unpriced' }));
   media.append(el('span', { class: 'card__corner card__corner--l', text: `No. ${String(index + 1).padStart(2, '0')}` }));
   if (status === 'unlocked') media.append(el('span', { class: 'card__stamp', text: 'Unlocked' }));
-  else if (status === 'locked') media.append(el('span', { class: 'card__corner card__corner--r', text: `${Math.floor(item.progress * 100)}%` }));
   media.append(el('span', { class: 'card__glare', 'aria-hidden': 'true' }));
 
   const converted = item.priceBase !== null && item.currency !== base;
@@ -152,7 +175,7 @@ function card(item, index, s) {
   const hoursText = status === 'claimed' ? 'Claimed ✓' : status === 'unlocked' ? 'Paid for' : status === 'unpriced' ? '—' : `${hours(item.hoursToGo)} to go`;
   const label = `${item.title}. ${status === 'locked' ? `${Math.floor(item.progress * 100)}% earned, ${hours(item.hoursToGo)} of work to go` : status}.`;
 
-  return el('li', { class: 'card', data: { id: item.id, status, priority: String(item.priority) }, style: { '--p': status === 'unpriced' ? 0 : item.progress } },
+  const node = el('li', { class: 'card', data: { id: item.id, status, priority: String(item.priority) } },
     el('div', { class: 'card__inner' },
       media,
       el('div', { class: 'card__body' },
@@ -165,6 +188,33 @@ function card(item, index, s) {
     ),
     el('button', { class: 'card__hit', type: 'button', 'aria-label': label, 'data-cursor': 'View' }),
   );
+  photos.set(node, photoKey(item));
+  return node;
+}
+
+const photoKey = (item) => JSON.stringify([item.image, statusOf(item), item.brand || item.store || item.name]);
+
+/**
+ * A live update that only changes numbers: the text and label are swapped in, and the
+ * ring (and, on screen, the bar under it) slide to the new value, while the photo, its
+ * chains and any keyboard focus stay exactly where they are.
+ */
+function patch(node, fresh, item, slide) {
+  node.dataset.priority = fresh.dataset.priority;
+  node.querySelector('.card__corner--l').textContent = fresh.querySelector('.card__corner--l').textContent;
+  node.querySelector('.card__hit').setAttribute('aria-label', fresh.querySelector('.card__hit').getAttribute('aria-label'));
+  const body = node.querySelector('.card__body');
+  const next = fresh.querySelector('.card__body');
+  if (slide) { // the bar stays, so its width transitions along with the ring
+    const bar = body.querySelector('.card__bar');
+    const nextBar = next.querySelector('.card__bar');
+    for (const child of [...body.children]) if (child !== bar) child.remove();
+    for (const child of [...next.children]) if (child !== nextBar) body.insertBefore(child, bar);
+    bar.style.setProperty('--p', nextBar.style.getPropertyValue('--p'));
+  } else {
+    body.replaceWith(next);
+  }
+  patchChains(node.querySelector('.card__media'), { progress: item.progress, unpriced: statusOf(item) === 'unpriced' }, { slide });
 }
 
 function placeholder(item) {

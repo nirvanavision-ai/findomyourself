@@ -73,6 +73,9 @@ if ($view === 'app') {
     grant_view_access($settings); // a private site stays open to its owner
 }
 $formToken = $view === 'app' ? '' : form_token(); // sets a cookie, so before any output
+// Opened from another site (the "+ Findom" bookmark on a shop's page): the sign-in cookie wasn't
+// sent, being SameSite=Strict. The sign-in form then reloads itself once to check (js/recheck.js).
+$recheck = $view === 'login' && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET' && ($_SERVER['HTTP_SEC_FETCH_SITE'] ?? '') === 'cross-site';
 ?><!doctype html>
 <html lang="en">
 <head>
@@ -94,6 +97,7 @@ $formToken = $view === 'app' ? '' : form_token(); // sets a cookie, so before an
   <?php if ($view === 'app'): ?><link rel="preload" href="../assets/fonts/jetbrains-mono-var.woff2" as="font" type="font/woff2" crossorigin><?php endif; ?>
   <?php /* asset() paths are relative to the site root; this page lives one folder down. */ ?>
   <link rel="stylesheet" href="../<?= h(asset('admin/admin.css')) ?>">
+  <?php if ($recheck): ?><script src="../<?= h(asset('admin/js/recheck.js')) ?>"></script><?php endif; ?>
 </head>
 <body class="view-<?= h($view) ?>">
 <?php if ($view !== 'app'): ?>
