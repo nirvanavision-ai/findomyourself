@@ -258,8 +258,9 @@ const LINK_SERVICE_DOMAINS = [
 ];
 
 /**
- * Unwraps Google redirect/search wrappers (and Facebook/Instagram link shims) without touching the
- * link inside: "google.com/url?q=https://shop.com/x?tag%3Dme-20" → "https://shop.com/x?tag=me-20".
+ * Unwraps Google redirect/search wrappers and social sites' outgoing-link redirects (Facebook,
+ * Instagram, Threads, Pinterest, Reddit, TikTok, YouTube) without touching the link inside:
+ * "google.com/url?q=https://shop.com/x?tag%3Dme-20" → "https://shop.com/x?tag=me-20".
  */
 function unwrap_google_link(string $url): string
 {
@@ -270,10 +271,18 @@ function unwrap_google_link(string $url): string
             break;
         }
         $host = strtolower($p['host']);
-        if (preg_match('/(^|\.)google\.[a-z.]+$/', $host) && in_array($p['path'] ?? '', ['/url', '/search', '/imgres', '/aclk'], true)) {
+        $path = $p['path'] ?? '';
+        if (preg_match('/(^|\.)google\.[a-z.]+$/', $host) && in_array($path, ['/url', '/search', '/imgres', '/aclk'], true)) {
             $keys = ['q', 'url', 'imgurl', 'adurl'];
-        } elseif (preg_match('/^(l|lm)\.(facebook|instagram|messenger)\.com$/', $host) || $host === 'l.threads.net') {
+        } elseif (preg_match('/^(l|lm)\.(facebook|instagram|messenger)\.com$/', $host) || $host === 'l.threads.net'
+            || (preg_match('/^((www|m)\.)?facebook\.com$/', $host) && $path === '/l.php')) {
             $keys = ['u'];
+        } elseif ((preg_match('/(^|\.)pinterest\.[a-z.]+$/', $host) && preg_match('#^/offsite/?$#', $path)) || $host === 'out.reddit.com') {
+            $keys = ['url'];
+        } elseif (preg_match('/^((www|m)\.)?tiktok\.com$/', $host) && preg_match('#^/link(/|$)#', $path)) {
+            $keys = ['target'];
+        } elseif (preg_match('/^((www|m)\.)?youtube\.com$/', $host) && $path === '/redirect') {
+            $keys = ['q'];
         } else {
             break;
         }
@@ -293,7 +302,10 @@ function unwrap_google_link(string $url): string
     return $url;
 }
 
-/** Unwraps Google redirect/search wrappers and strips tracking parameters. */
+/**
+ * Unwraps Google redirect/search wrappers and strips tracking parameters, and the ones that name
+ * whoever opened a newsletter's link (Klaviyo, HubSpot, Mailchimp, ConvertKit…).
+ */
 function normalize_link(string $url): string
 {
     $url = unwrap_google_link($url);
@@ -301,7 +313,8 @@ function normalize_link(string $url): string
     if (!$p || empty($p['host']) || empty($p['scheme'])) {
         return $url;
     }
-    $query = drop_query_params($p['query'] ?? '', '/^(utm_|mc_|_pos$|_sid$|_ss$|_psq$|_v$|gclid$|gbraid$|wbraid$|fbclid$|msclkid$|igshid$|ref_$|srsltid$|trk$|clickid$|irclickid$|ranmid$|ransiteid$)/');
+    $query = drop_query_params($p['query'] ?? '', '/^(utm_|mc_|sfmc_|_pos$|_sid$|_ss$|_psq$|_v$|gclid$|gbraid$|wbraid$|fbclid$|msclkid$|igshid$|ref_$|srsltid$|trk$|clickid$|irclickid$|ranmid$|ransiteid$'
+        . '|_kx$|_hsenc$|_hsmi$|ck_subscriber_id$|mkt_tok$|oly_enc_id$|oly_anon_id$|email$)/');
     return strtolower($p['scheme']) . '://' . strtolower($p['host']) . (isset($p['port']) ? ':' . $p['port'] : '')
         . ($p['path'] ?? '/') . ($query !== '' ? '?' . $query : '');
 }
@@ -402,7 +415,7 @@ function name_from_url(string $url): string
     $slug = product_slug($url);
     $slug = (string)preg_replace('/^((wo)?mens?[-_])+/i', '', $slug);
     if (stripos((string)parse_url($url, PHP_URL_PATH), '/products/') !== false) {
-        $slug = (string)preg_replace('/[-_]\d{1,2}$/', '', $slug); // Shopify's "-1" duplicate suffix
+        $slug = (string)preg_replace('/[-_]\d$/', '', $slug); // Shopify's "-1" duplicate suffix, not "air-max-90"
     }
     return $slug === '' ? '' : mb_substr(slug_words($slug), 0, 140);
 }
@@ -513,7 +526,26 @@ function trim_slug(string $segment): string
     $slug = (string)preg_replace('/[-_]p-(?=[a-z]*\d)[a-z0-9]{6,}$/i', '', $slug);            // Gucci
     $slug = (string)preg_replace('/[-_](item|p|prod|product|dp|pid|sku)[-_]?\d+$/i', '', $slug); // Farfetch, Mytheresa, Neiman, Sephora, Zara
     $slug = (string)preg_replace('/[-_]?\d{5,}$/', '', $slug);                                   // Saks and other trailing ids
+    // Style codes left at the end (Hermès "oran-sandal-H221035Z", Balenciaga "…-black-6713091VG9Y1000",
+    // LV "…-M40995") or in front (Dior "M0565OCEY_M928-medium-lady-d-lite-bag").
+    while (preg_match('/^(.*[^-_+\s])[-_+\s]+([a-z0-9.]+)$/i', $slug, $m) && is_product_code($m[2])) {
+        $slug = $m[1];
+    }
+    if (preg_match('/^([a-z0-9.]+)(?:_[a-z0-9.]+)*-+(.+)$/i', $slug, $m) && is_product_code($m[1]) && is_wordy($m[2])) {
+        $slug = $m[2];
+    }
     return is_wordy($slug) ? $slug : '';
+}
+
+/**
+ * True for a shop's style or stock code rather than part of a name: a run of 5+ digits, or 8+ letters
+ * and digits with 3+ digits among them ("H221035Z", "M40995", "M0565OCEY"). Model names stay: "90"
+ * (Air Max), "15" (iPhone), "1994", "13cm", "40oz", "2nd", "1000XM5", "RTX4090", "iphone15pro".
+ */
+function is_product_code(string $token): bool
+{
+    return (bool)preg_match('/\d{5,}/', $token)
+        || (strlen($token) >= 8 && preg_match('/[a-z]/i', $token) && preg_match_all('/\d/', $token) >= 3);
 }
 
 /** True when a slug has a real word in it, not only ids like "B0CHWRXH8B" or "aB3xYz". */
@@ -527,6 +559,9 @@ function is_wordy(string $slug): bool
     return false;
 }
 
+/** Little words a name keeps lowercase inside it ("Live in High Waist Leggings", "Eau de Parfum", "Acqua di Parma"). */
+const NAME_SMALL_WORDS = ['and', 'or', 'of', 'on', 'in', 'to', 'by', 'with', 'for', 'the', 'de', 'des', 'du', 'di', 'del', 'le', 'les'];
+
 /** "air-force-1-07-mens-shoes" → "Air Force 1 07 Men’s Shoes"; keeps "AirPods" and "iPhone" as they are. */
 function slug_words(string $slug): string
 {
@@ -535,7 +570,7 @@ function slug_words(string $slug): string
     $out = [];
     foreach ($words as $i => $word) {
         $lower = mb_strtolower($word);
-        if (in_array($lower, ['and', 'or', 'of', 'on', 'in', 'to', 'by', 'with', 'for', 'the'], true)) {
+        if (in_array($lower, NAME_SMALL_WORDS, true)) {
             $out[] = $i > 0 ? $lower : ucfirst($lower);
         } elseif (in_array($lower, ['mens', 'womens'], true)) {
             $out[] = $lower === 'mens' ? 'Men’s' : 'Women’s';
@@ -543,6 +578,8 @@ function slug_words(string $slug): string
             $out[] = $word; // written that way on purpose: AirPods, iPhone, McQueen
         } elseif (!$shouting && preg_match('/^\p{Lu}{2,4}$/u', $word)) {
             $out[] = $word; // LED, UGG
+        } elseif (!$shouting && preg_match('/^(?=.*\d)(?=.*\p{Lu})[\p{Lu}\d]+$/u', $word)) {
+            $out[] = $word; // model names written in capitals: 128GB, S24, 1000XM5
         } elseif (mb_strlen($word) <= 2 && preg_match('/^\p{L}+$/u', $word)) {
             $out[] = mb_strtoupper($word); // "ma" → "MA"
         } else {
@@ -559,9 +596,12 @@ function slug_words(string $slug): string
  * ['url','store','name','brand','variant','price','currency','image','found','blocked','error'].
  * 'url' is the canonical product link, after following short links (amzn.to, ShopMy, LTK, bit.ly…)
  * to the shop. Never throws: when the shop can't be reached, the name still comes from the link itself.
+ * $landed gets where the link led, before it was shortened (an Amazon short link's tag is still in
+ * it), or '' when it wasn't followed somewhere else.
  */
-function inspect_link(string $rawUrl, array $knownBrands = []): array
+function inspect_link(string $rawUrl, array $knownBrands = [], ?string &$landed = null): array
 {
+    $landed = '';
     $pasted = normalize_link($rawUrl);
     $url = canonical_product_url($pasted);
     if (clean_url($url) === '') {
@@ -576,11 +616,12 @@ function inspect_link(string $rawUrl, array $knownBrands = []): array
     $page = null;
     try {
         $r = safe_request($url, FETCH_HTML_MAX, HTML_ACCEPT);
-        $landed = landing_url($url, $r['url']);
-        if ($landed !== $url) {
-            $info['url'] = $landed;
-            $info['store'] = store_name($landed);
-            array_unshift($worded, normalize_link($r['url']));
+        $landing = landing_url($url, $r['url']);
+        if ($landing !== $url) {
+            $info['url'] = $landing;
+            $info['store'] = store_name($landing);
+            $landed = normalize_link($r['url']);
+            array_unshift($worded, $landed);
         }
         if (is_bot_wall($r['body'])) {
             $info['blocked'] = true;
@@ -959,7 +1000,7 @@ function tidy_product_name(string $name, string $brand, string $store): string
     $name = trim((string)preg_replace('/\s*[|–—:-]\s*(' . preg_quote($store, '/') . '|farfetch|amiri|ssense|shop now|buy online)[^|–—]*$/iu', '', $name));
     $name = trim((string)preg_replace('/\s*[|]\s*[^|]*$/u', '', $name));
     if ($brand !== '' && mb_stripos($name, $brand . ' ') === 0 && mb_strlen($name) > mb_strlen($brand) + 3) {
-        $name = trim(mb_substr($name, mb_strlen($brand)));
+        $name = name_after_brand(mb_substr($name, mb_strlen($brand)));
     }
     return clean_text($name, 140) ?: $original;
 }
@@ -1019,10 +1060,24 @@ function split_brand(string $name, array $extraBrands = []): array
         $b = (string)$brand;
         if ($b !== '' && mb_strlen($name) > mb_strlen($b) + 2
             && mb_strtolower(mb_substr($name, 0, mb_strlen($b) + 1)) === mb_strtolower($b . ' ')) {
-            return [$b === "L'Objet" ? 'L’Objet' : $b, trim(mb_substr($name, mb_strlen($b)))];
+            return [$b === "L'Objet" ? 'L’Objet' : $b, name_after_brand(mb_substr($name, mb_strlen($b)))];
         }
     }
     return ['', $name];
+}
+
+/**
+ * The rest of a name once the brand in front of it is taken off. A name from a link can leave a
+ * little word first (Nordstrom's "khaite-the-lotus-mini-bag" → "the Lotus Mini Bag"), which becomes
+ * "The Lotus Mini Bag"; anything else stays as written ("Gucci loafers" keeps its "loafers").
+ */
+function name_after_brand(string $rest): string
+{
+    $rest = trim($rest);
+    if (preg_match('/^([a-z]+)(?:\s|$)/', $rest, $m) && in_array($m[1], NAME_SMALL_WORDS, true)) {
+        return ucfirst($rest);
+    }
+    return $rest;
 }
 
 /**

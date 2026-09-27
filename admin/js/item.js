@@ -9,7 +9,7 @@
  */
 import {
   h, icon, swap, sig, uid, local, debounce, money, balance, amountInput, parseAmount, currencyName, currencyShort, when, shortDate,
-  plural, hostOf, extractUrl, reducedMotion,
+  plural, hostOf, extractUrl, reducedMotion, keepsFocus, focusLost,
 } from './core.js';
 import { api, upload, store, subscribe } from './api.js';
 import {
@@ -113,15 +113,21 @@ function suggestionButton(suggestion, url) {
   if (!label) return null;
   const wrap = h('div', { class: 'learn-offer' });
   const btn = button(label, { size: 'sm', iconName: 'sparkle', className: 'btn-wrap' });
-  btn.addEventListener('click', () => busy(btn, async () => {
-    try {
-      const res = await api('affiliate.learn', { url });
-      wrap.replaceChildren(h('p', { class: 'learn-done' }, icon('check'), `Done: ${res.applied}.`));
-      toast(`Learned: ${res.applied}. Visitors go through it from now on.`, { tone: 'gold' });
-    } catch (e) {
-      toastError(e);
-    }
-  }));
+  btn.addEventListener('click', (e) => {
+    const follow = keepsFocus(e);
+    busy(btn, async () => {
+      try {
+        const res = await api('affiliate.learn', { url });
+        const done = h('p', { class: 'learn-done', tabindex: '-1' }, icon('check'), `Done: ${res.applied}.`);
+        const lost = follow && focusLost(wrap);
+        wrap.replaceChildren(done);
+        if (lost) done.focus({ preventScroll: true }); // the button it replaced had the keyboard
+        toast(`Learned: ${res.applied}. Visitors go through it from now on.`, { tone: 'gold' });
+      } catch (err) {
+        toastError(err);
+      }
+    });
+  });
   wrap.append(btn);
   return wrap;
 }
@@ -146,8 +152,9 @@ function valuesOf(item, state = store.state) {
 
 /**
  * Opens the editor. opts: {warnings: [], duplicate: bool, focus: 'price'|'photo'|'name', fromLink: bool,
- * affiliate: {network, kind} (her link was recognized), suggestion + pasted (what that link could teach),
- * prefill: {field: value} + image + grabbed + sameAs (a new item from the bookmarklet)}.
+ * affiliate: {network, kind, id} (her link was recognized), suggestion + pasted (what that link could teach),
+ * prefill: {field: value} + image + grabbed + sameAs (a new item from the bookmarklet),
+ * photoLink (an image link waiting in the photo box for her Fetch)}.
  * id null = a new item typed in by hand (or grabbed from a shop page). Returns the sheet.
  */
 export function openItemEditor(id = null, opts = {}) {
@@ -281,25 +288,71 @@ export function openItemEditor(id = null, opts = {}) {
     const current = find();
     const clicks = current ? current.clicks : null;
     try {
-      const res = await api('affiliate.detect', { url: mineLink || productLink });
+      // With Your link, the server says where the item's button would go (out): a plain link there
+      // (the shop link again, an Amazon product without a tag) goes out like the shop link would.
+      const res = await api('affiliate.detect', mineLink ? { url: mineLink, shopUrl: productLink || '' } : { url: productLink });
       if (seq !== outSeq || gone) return;
       const found = res.detected;
       if (mineLink) {
+        if (res.out && res.out.kind !== 'mine') {
+          showOut(res.out, clicks, { key: `plain:${key}`, node: h('p', { class: 'muted', text: 'That’s a plain shop link, not an affiliate link, so it counts as if Your link were empty. Leave it empty unless you have your own affiliate link for this item.' }) });
+          return;
+        }
         const network = found && found.network !== 'Short link' ? networkName(found.network) : '';
-        showOut({ url: mineLink, kind: 'mine', label: network ? `Your link (${network})` : 'Your link', affiliate: true }, clicks);
+        showOut(res.out || { url: mineLink, kind: 'mine', label: network ? `Your link (${network})` : 'Your link', affiliate: true }, clicks);
         return;
       }
-      // Her own affiliate or creator link typed as the shop link: it belongs in "Your link".
-      if (found && found.kind !== 'amazon' && found.network !== 'Short link') {
-        const move = button('Move it to Your link', { size: 'sm', iconName: 'down', onclick: () => {
-          mine.value = url.value.trim();
-          url.value = found.destination || '';
+      // Her own affiliate or creator link typed as the shop link: it belongs in "Your link". The shop
+      // link inside it (when it has one) takes its place; a creator or short link stays, so Refresh
+      // and the photo lookup can still follow it to the product page.
+      const moveButton = () => button('Move it to Your link', { size: 'sm', iconName: 'down', onclick: (e) => {
+        const follow = keepsFocus(e);
+        mine.value = url.value.trim();
+        if (found.destination) url.value = found.destination;
+        syncLink();
+        syncMissing();
+        saveDraft();
+        if (follow) mine.focus(); // its button is about to go: the keyboard goes where the link went
+      } });
+      if (found && found.kind === 'amazon') {
+        // Her saved tag replaces the one in the link. Without one, the tag in it would be what visitors buy through.
+        if (res.preview && res.preview.kind === 'amazon') {
+          showOut(res.preview, clicks);
+          return;
+        }
+        const strip = found.destination && button('Remove the tag', { size: 'sm', iconName: 'x', onclick: (e) => {
+          const follow = keepsFocus(e);
+          url.value = found.destination;
           syncLink();
           syncMissing();
           saveDraft();
+          if (follow) url.focus();
         } });
+        const saved = ((store.state.settings.affiliate || {}).amazon || {})[found.marketplace] || '';
+        const learn = res.suggestion && res.suggestion.amazon && !saved ? suggestionButton(res.suggestion, productLink) : null;
+        showOut(null, null, { key: `amazon:${key}`, node: h('div', { class: 'out-move' },
+          h('p', { text: `That link carries the Amazon tag “${found.id}”. If it’s yours, move it to Your link. If it isn’t, remove it.` }),
+          h('div', { class: 'button-row' }, moveButton(), strip), learn) });
+        return;
+      }
+      if (found && found.network === 'Affiliate network' && found.destination) {
+        // A link through a site it doesn't know by name ("…?url=…"): maybe her link, maybe just a redirect.
+        const useShop = button('Use the shop link', { size: 'sm', iconName: 'link', onclick: (e) => {
+          const follow = keepsFocus(e);
+          url.value = found.destination;
+          syncLink();
+          syncMissing();
+          saveDraft();
+          if (follow) url.focus();
+        } });
+        showOut(null, null, { key: `redirect:${key}`, node: h('div', { class: 'out-move' },
+          h('p', { text: `That link goes through ${hostOf(productLink) || 'another site'} before it reaches ${hostOf(found.destination) || 'the shop'}. If it’s your affiliate link, move it to Your link. If not, use the shop link inside it.` }),
+          h('div', { class: 'button-row' }, moveButton(), useShop)) });
+        return;
+      }
+      if (found && found.network !== 'Short link') {
         // Where it would lead as it stands isn't worth showing: the move is the fix.
-        showOut(null, null, { key: `move:${key}`, node: h('div', { class: 'out-move' }, h('p', { text: `That’s ${aLink(networkName(found.network))}, so it works best as Your link.` }), move) });
+        showOut(null, null, { key: `move:${key}`, node: h('div', { class: 'out-move' }, h('p', { text: `That’s ${aLink(networkName(found.network))}, so it works best as Your link.` }), moveButton()) });
         return;
       }
       showOut(res.preview, clicks);
@@ -394,7 +447,12 @@ export function openItemEditor(id = null, opts = {}) {
       button(current && current.image ? 'Replace' : 'Upload', { size: 'sm', kind: current && current.image ? 'ghost' : 'primary', iconName: 'upload', dataset: { key: 'photo-upload' }, onclick: () => pickFile(), disabled: photoBusy || gone }),
       canPaste && button('Paste', { size: 'sm', iconName: 'paste', dataset: { key: 'photo-paste' }, onclick: () => pasteFromClipboard(), disabled: photoBusy || gone }),
       current && current.image && button('Remove', { size: 'sm', kind: 'danger', iconName: 'trash', dataset: { key: 'photo-remove' }, onclick: () => removePhoto(), disabled: photoBusy || gone }));
-    if (current && !current.image && current.imageSource) {
+    // A failed fetch or upload keeps its error on screen (the next attempt clears it) instead of the hint.
+    if (photoMsg.classList.contains('is-error')) return;
+    if (current && !current.image && opts.photoLink) {
+      photoOk(`The photo from ${hostOf(opts.photoLink) || 'the shop page'} is ready: press Fetch to keep it.`);
+      if (!photoLink.value) photoLink.value = opts.photoLink;
+    } else if (current && !current.image && current.imageSource) {
       photoOk(`Showing the photo straight from ${hostOf(current.imageSource) || 'the shop'}. Fetch it to keep a copy that can’t break.`);
       if (!photoLink.value) photoLink.value = current.imageSource;
     } else if (!current && pendingImage) {
@@ -804,7 +862,7 @@ export function openItemEditor(id = null, opts = {}) {
   // A pasted affiliate link: say so, and offer to learn the shop (or her Amazon tag) from it.
   const learn = opts.suggestion && opts.pasted ? suggestionButton(opts.suggestion, opts.pasted) : null;
   if (opts.affiliate) {
-    notices.append(note('ok', h('p', { text: `Recognized ${aLink(networkName(opts.affiliate.network))}. It’s saved as your link, and visitors will go through it.` }), learn));
+    notices.append(recognizedNote(opts.affiliate, learn));
   } else if (learn) {
     notices.append(note('info', h('p', { text: 'That link can set up the whole shop, not just this item.' }), learn));
   }
@@ -812,8 +870,11 @@ export function openItemEditor(id = null, opts = {}) {
     notices.append(note('info', h('p', { text: 'Filled in from the shop page. Check it over, then add it to the list.' })));
   }
   if (opts.sameAs) {
-    notices.prepend(note('warn', h('p', { text: 'Looks like this is already on your list.' }),
-      h('button', { class: 'link-btn inline', type: 'button', text: 'Open that one instead', onclick: () => openInstead(opts.sameAs) })));
+    // Already there without a photo (the shop blocked the fetch, say): this page's photo can go to it.
+    const other = s0.items.find((i) => i.id === opts.sameAs);
+    const givePhoto = !!(pendingImage && other && !other.image);
+    notices.prepend(note('warn', h('p', { text: givePhoto ? 'Looks like this is already on your list, without a photo.' : 'Looks like this is already on your list.' }),
+      h('button', { class: 'link-btn inline', type: 'button', text: givePhoto ? 'Give it this photo' : 'Open that one instead', onclick: () => openInstead(opts.sameAs, givePhoto ? pendingImage : '') })));
   }
   sheet.body.append(notices, photoBox, form);
   sheet.foot.append(button('Cancel', { onclick: () => sheet.requestClose() }), saveBtn);
@@ -836,6 +897,7 @@ export function openItemEditor(id = null, opts = {}) {
 
   /* ── fill in, restoring unsaved edits from this device ── */
   write(opts.prefill ? { ...base, ...opts.prefill } : base); // prefilled (grabbed) counts as unsaved: only Save adds it
+  const prefillSig = opts.prefill ? sig(trimmed(read())) : null; // as filled in, before she touched it
   const draft = opts.prefill ? null : local.get(draftKey(itemId));
   if (draft && draft.values && Date.now() - draft.at < DRAFT_DAYS * 86400000 && sig(trimmed({ ...base, ...draft.values })) !== sig(trimmed(base))) {
     write({ ...base, ...draft.values, status: base.status === 'claimed' ? 'claimed' : draft.values.status || base.status });
@@ -887,14 +949,55 @@ export function openItemEditor(id = null, opts = {}) {
     rememberOpen(null);
   };
 
-  /** Swaps this (unsaved) editor for the item that's already on the list, once this one has closed. */
-  async function openInstead(otherId) {
+  /**
+   * "Recognized an Amazon Associates link with the tag x-20…": the tag or ID is named, so a link copied
+   * from someone else's page stands out, with a way to take it off when it isn't hers. That's offered
+   * only where the shop link was taken out of it (Amazon's /dp/ link, a network's link to the shop):
+   * otherwise the shop link would still be the same link.
+   */
+  function recognizedNote(found, learnOffer) {
+    const tag = found.kind === 'amazon' ? 'tag' : 'ID';
+    const text = h('p', { text: `Recognized ${aLink(networkName(found.network))}${found.id ? ` with the ${tag} ${found.id}` : ''}. It’s saved as your link, and visitors will go through it. ` });
+    const current = find();
+    const separate = !!current && !!current.url && !!current.affiliateUrl && current.url !== current.affiliateUrl
+      && (found.kind === 'amazon' || (found.kind === 'wrapper' && hostOf(current.url) !== hostOf(current.affiliateUrl)));
+    const box = note('ok', text, learnOffer);
+    if (!separate) return box;
+    const notMine = h('button', { class: 'link-btn inline', type: 'button', text: found.id ? `Not my ${tag}` : 'Not my link' });
+    notMine.addEventListener('click', async (e) => {
+      const follow = keepsFocus(e);
+      notMine.disabled = true;
+      try {
+        const res = await api('item.save', { item: { id: itemId, affiliateUrl: '' } });
+        mine.value = ''; // even with other edits in the form, Save mustn't bring it back
+        syncOut();
+        saveDraft();
+        const now = res.state.items.find((i) => i.id === itemId);
+        const out = now && now.out;
+        const where = out && ['amazon', 'rule', 'network'].includes(out.kind) ? `through ${out.label}` : 'straight to the shop';
+        const done = h('p', { tabindex: '-1', text: `Taken off Your link. Visitors go ${where} instead.` });
+        const lost = follow && focusLost(box);
+        box.replaceWith(note('ok', done));
+        if (lost) done.focus({ preventScroll: true }); // the button it replaced had the keyboard
+      } catch (err) {
+        notMine.disabled = false;
+        toastError(err);
+      }
+    });
+    text.append(notMine);
+    return box;
+  }
+
+  /** Swaps this (unsaved) editor for the item that's already on the list, once this one has closed (photo: ready to fetch into it). */
+  async function openInstead(otherId, photo = '') {
     const closed = sheet.onClosed;
     sheet.onClosed = () => {
       closed();
-      openItemEditor(otherId);
+      openItemEditor(otherId, photo ? { photoLink: photo, focus: 'photo' } : {});
     };
-    await sheet.requestClose();
+    // Nothing typed since it was filled in from the shop page: nothing to discard, so no asking.
+    if (prefillSig !== null && sig(trimmed(read())) === prefillSig) sheet.close();
+    else await sheet.requestClose();
     if (!sheet.closed) sheet.onClosed = closed;
   }
 

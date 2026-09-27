@@ -10,10 +10,11 @@
  * js/today.js     vault, goal, focus timer, commands, fines, money in, receipts
  * js/ledger.js    receipts: rows, editing, the full history, logging past work
  * js/add.js       paste a link from any shop (List, Today, and the + in the top bar)
- * js/grab.js      the "+ Findom" bookmarklet and the #add= link it opens
+ * js/grab.js      the "+ Findom" bookmarklet and the #add= link it opens (js/recheck.js, on the
+ *                 sign-in page only, lets that link in without signing in again)
  * js/list.js      filters, the list, reordering
  * js/item.js      the item editor, her own (affiliate) link, photos, claiming
- * js/bulk.js      pasting a whole list, fetching photos in bulk
+ * js/bulk.js      pasting a whole list, fetching photos in bulk (and quietly in the background)
  * js/rules.js     hourly rate, commands, fines
  * js/settings.js  site words, voice, money, time zone, visibility, password, affiliate links, backup
  */
@@ -28,6 +29,7 @@ import { openItemEditor, editorState } from './js/item.js';
 import { recentWorkLabels } from './js/ledger.js';
 import { openAddSheet } from './js/add.js';
 import { takeGrab, openGrabbed } from './js/grab.js';
+import { autoFetchPhotos, resumeAutoPhotos, stopAutoPhotos, photoStatus } from './js/bulk.js';
 
 const TABS = [
   { id: 'today', label: 'Today', icon: 'flame' },
@@ -82,6 +84,7 @@ function buildShell() {
       h('a', { class: 'brand', href: '#today', onclick: (e) => { e.preventDefault(); go('today'); } }, 'Control ', h('em', { text: 'Room' })),
       h('nav', { class: 'top-tabs', 'aria-label': 'Sections' }, TABS.map((t) => tabButton(t, 'top'))),
       h('div', { class: 'topbar-end' },
+        photoStatus, // "Fetching 3 photos…" while missing photos download in the background
         pill,
         addButton,
         h('a', { class: 'btn btn-ghost btn-sm top-link', href: '../', target: '_blank', rel: 'noopener' }, 'View site ', icon('external')),
@@ -224,10 +227,24 @@ async function boot() {
   route();
   tick();
 
+  // Missing photos download by themselves, once per visit (a pass that was cut short by the page
+  // being hidden or the connection dropping carries on when she's back); polls never start one.
+  setTimeout(autoFetchPhotos, 1500);
+
   setInterval(() => poll(true), POLL_MS);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      stopAutoPhotos('hidden');
+    } else {
+      poll();
+      resumeAutoPhotos();
+    }
+  });
   window.addEventListener('focus', () => poll());
-  window.addEventListener('online', () => poll(true));
+  window.addEventListener('online', () => {
+    poll(true);
+    resumeAutoPhotos();
+  });
   window.addEventListener('offline', () => { offline.hidden = false; });
   window.addEventListener('hashchange', route);
   window.addEventListener('beforeunload', (e) => {

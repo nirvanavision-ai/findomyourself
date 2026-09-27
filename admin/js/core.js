@@ -72,6 +72,20 @@ export function swap(container, ...children) {
   }
 }
 
+/**
+ * For a one-tap fix whose button goes away: whether the keyboard should follow it somewhere. The
+ * button had focus, and it wasn't a tap on a touch screen (focusing a field there would pop the
+ * on-screen keyboard up). Read it in the click handler, before anything is awaited.
+ */
+export const keepsFocus = (e) => document.activeElement === e.currentTarget
+  && (e.detail === 0 || !window.matchMedia('(pointer: coarse)').matches);
+
+/** Whether nothing else has the keyboard: it fell to the page (a focused button disappeared), or it's still inside `within`. */
+export function focusLost(within) {
+  const active = document.activeElement;
+  return !active || active === document.body || !active.isConnected || within.contains(active);
+}
+
 let uidCounter = 0;
 export const uid = (prefix = 'f') => `${prefix}-${++uidCounter}`;
 

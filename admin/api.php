@@ -12,13 +12,14 @@
  *                                                 item.goal true/false pins/unpins it as the current goal;
  *                                                 item.affiliateUrl is her own link for it ('' clears it)
  *   item.fromLink     {url, category?}            paste a link from any shop, or an affiliate link → new item
- *                                                 (name, brand, price, photo); answers affiliate {network, kind}
+ *                                                 (name, brand, price, photo); answers affiliate {network, kind, id}
  *                                                 when it's kept as her link, and suggestion (see affiliate.learn)
  *   link.inspect      {url}                       what a link tells us, without saving
  *   items.parse       {text}                      preview a pasted list
  *   items.import      {items}                     add the previewed items
  *   items.reorder     {ids}                       new display order
- *   items.fetchImages {exclude?}                  fetch missing photos, a few per call (answers "remaining")
+ *   items.fetchImages {ids?, exclude?, auto?, limit?}  fetch missing photos, a few per call (answers "remaining");
+ *                                                 auto: the background fetch (skips items tried in the last day)
  *   item.delete       {id}
  *   item.claim        {id, amount?}               buy it: the vault pays and it moves to the trophy wall
  *   item.unclaim      {id}
@@ -33,8 +34,9 @@
  *   session.stop      {minutes?, label?, discard?}
  *   settings.save     {settings}                  partial; settings.passcode (plain text) is hashed here;
  *                                                 each part of settings.affiliate that's sent replaces the old one
- *   affiliate.detect  {url}                       what an affiliate link is, what it would teach, and where
- *                                                 visitors would go for that shop (preview), without saving
+ *   affiliate.detect  {url, shopUrl?}             what an affiliate link is, what it would teach, and where
+ *                                                 visitors would go for that shop (preview), without saving;
+ *                                                 with shopUrl, where that item would go with url as Your link (out)
  *   affiliate.learn   {url}                       teach it one of her links: a rule for that shop, her Amazon
  *                                                 tag or the catch-all network (answers "applied")
  *   rules.save        {commands?, fines?}
@@ -52,6 +54,8 @@ require __DIR__ . '/../lib/images.php';
 require __DIR__ . '/../lib/import.php';
 
 const EDITABLE_ITEM_FIELDS = ['name', 'brand', 'variant', 'category', 'price', 'currency', 'url', 'affiliateUrl', 'priority', 'note'];
+const PHOTO_RETRY_SECONDS = 86400; // the automatic photo fetch waits a day after a miss… (RETRY_MS in admin/js/bulk.js)
+const PHOTO_AUTO_TRIES = 3;        // …and stops trying a link after this many (AUTO_TRIES there)
 
 send_admin_headers();
 
@@ -147,6 +151,7 @@ function admin_state(array $data): array
         'goalId' => pick_goal($views, $data['settings']),
         'items' => $views,
         'clicksTotal' => $clicksTotal,
+        'clicksCapped' => clicks_capped_today($clicks, $data['settings']['timezone']), // today's clicks stopped being counted
         'commands' => $data['commands'],
         'fines' => $data['fines'],
         'ledger' => array_slice($data['ledger'], 0, 400),
@@ -249,6 +254,17 @@ function url_key(string $url): string
     return rtrim((string)preg_replace('#^https?://(www\.)?#i', '', strtolower($url)), '/');
 }
 
+/**
+ * A new shop link as it's kept: its short form without tracking (Amazon's /dp/ASIN, without her
+ * search words or the tag of whoever's link she came through), like a pasted link. An affiliate or
+ * creator link typed in as the shop link stays whole: its parameters are what makes it work.
+ */
+function kept_shop_link(string $url): string
+{
+    $found = detect_affiliate_link($url);
+    return $found && $found['kind'] !== 'amazon' ? $url : (clean_url(canonical_product_url($url)) ?: $url);
+}
+
 /* ───────────────────────── items ───────────────────────── */
 
 function act_item_save(array $in): array
@@ -273,6 +289,11 @@ function act_item_save(array $in): array
     $imageUrl = clean_url($raw['imageUrl'] ?? '');
     $id = mutate_data(function (array &$data) use ($raw) {
         $index = item_index($data, $raw['id'] ?? null);
+        // A new or changed shop link (typed, or grabbed from the page she's on) is shortened like a pasted one.
+        if (isset($raw['url']) && is_string($raw['url']) && $raw['url'] !== ''
+            && ($index === null || $raw['url'] !== $data['items'][$index]['url'])) {
+            $raw['url'] = kept_shop_link($raw['url']);
+        }
         if ($index === null) {
             if (count($data['items']) >= MAX_ITEMS) {
                 json_fail(400, 'The list is full (' . MAX_ITEMS . ' items). Delete a few first.');
@@ -333,29 +354,50 @@ function act_link_inspect(array $in): array
 
 /**
  * The "paste a link" box: a link from any shop, or one of her affiliate links (Awin, ShopMy, Amazon
- * with her tag…), which is kept as her link while the shop link inside it (or at the end of its
- * redirects) becomes the item's link. The item is created even if the shop refuses to talk to us.
+ * with a tag…), which is kept as her link while the shop link inside it (or at the end of its
+ * redirects) becomes the item's link. A link her settings already cover (an Amazon store she has a
+ * tag for, Skimlinks/Sovrn while she has a catch-all) isn't kept: her own tag or ID is used, not the
+ * one in the link. The item is created even if the shop refuses to talk to us.
  */
 function act_item_from_link(array $in): array
 {
     @set_time_limit(60);
     $pasted = unwrap_google_link(trim(is_string($in['url'] ?? null) ? $in['url'] : ''));
     $found = detect_affiliate_link($pasted);
+    // A link through a site we don't know by name ("…?url=…") may only be a redirect: the shop link
+    // inside it becomes the item's link, but it isn't kept as her link or offered as a rule.
+    $unknown = $found && $found['network'] === 'Affiliate network';
+    // An Amazon link with a tag is looked up as pasted: the words in it can still name the product.
+    $lookup = $found && $found['destination'] !== '' && $found['kind'] !== 'amazon' ? $found['destination'] : $pasted;
+    $landed = '';
     try {
-        $info = inspect_link($found && $found['destination'] !== '' ? $found['destination'] : $pasted, wishlist_brands(load_data()));
+        $info = inspect_link($lookup, wishlist_brands(load_data()), $landed);
     } catch (RuntimeException $e) {
         fail_on($e, 400);
         return [];
     }
+    // An Amazon short link is what it led to: SiteStripe's carry a tag, the app's Share links don't.
+    $found = amazon_short_link_found($pasted, $found, $landed);
     $data = load_data();
     $affiliate = $data['settings']['affiliate'];
     $mine = '';
-    if ($found && $found['network'] !== 'Short link' && !affiliate_link_redundant($found, $affiliate)) {
-        $mine = clean_url($pasted);
+    $notes = [];
+    if ($unknown) {
+        $notes[] = 'That link went through ' . link_host($pasted) . ' first, so only the shop link inside it was kept. If it was your affiliate link, paste it into Your link.';
+    } elseif ($found && $found['network'] !== 'Short link') {
+        $hers = own_affiliate_id($found, $affiliate);
+        if ($hers === '') {
+            $mine = clean_url($pasted);
+        } elseif ($found['id'] !== '' && strcasecmp($hers, $found['id']) !== 0) {
+            $notes[] = 'That link carried the ' . ($found['kind'] === 'amazon' ? 'Amazon tag ' : $found['network'] . ' ID ') . $found['id']
+                . '. Your own ' . ($found['kind'] === 'amazon' ? 'tag (' . $hers . ')' : AFFILIATE_NETWORKS[$affiliate['network']] . ' ID')
+                . ' is used instead.';
+        }
     }
-    $learned = learn_affiliate_link($pasted);
+    $learned = $unknown ? null : learn_affiliate_link($pasted);
     $suggestion = $learned && affiliate_suggestion_is_new($learned, $affiliate) ? $learned : null;
-    $recognized = $mine !== '' ? ['network' => $found['network'], 'kind' => $found['kind']] : null;
+    // What she's told was kept as her link, with the tag or ID in it, so one that isn't hers stands out.
+    $recognized = $mine !== '' ? ['network' => $found['network'], 'kind' => $found['kind'], 'id' => $found['id']] : null;
 
     $pastedKey = clean_url($pasted);
     foreach ($data['items'] as $item) {
@@ -372,10 +414,10 @@ function act_item_from_link(array $in): array
                 }
             });
             return ['itemId' => $item['id'], 'duplicate' => true, 'info' => $info, 'affiliate' => $recognized,
-                'suggestion' => $suggestion, 'warnings' => ['That’s already on your list, so your link was added to it.']];
+                'suggestion' => $suggestion, 'warnings' => array_merge($notes, ['That’s already on your list, so your link was added to it.'])];
         }
         return ['itemId' => $item['id'], 'duplicate' => true, 'info' => $info, 'affiliate' => null,
-            'suggestion' => $suggestion, 'warnings' => ['That link is already on your list.']];
+            'suggestion' => $suggestion, 'warnings' => array_merge($notes, ['That link is already on your list.'])];
     }
     $id = mutate_data(function (array &$data) use ($info, $in, $mine) {
         if (count($data['items']) >= MAX_ITEMS) {
@@ -399,7 +441,7 @@ function act_item_from_link(array $in): array
         return $item['id'];
     });
 
-    $warnings = [];
+    $warnings = $notes;
     if (!$info['found']) {
         $warnings[] = ($info['error'] ?: $info['store'] . ' didn’t share the details.') . ' The item was still added, named from the link. Check the name and add the price.';
     } elseif ($info['price'] === null) {
@@ -460,10 +502,14 @@ function act_items_import(array $in): array
                 $fields['url'] = canonical_product_url($fields['url']);
             }
             if (isset($fields['affiliateUrl']) && is_string($fields['affiliateUrl']) && $fields['affiliateUrl'] !== '') {
-                // An affiliate link that does nothing her settings don't already do isn't kept as her link.
+                // An affiliate link her settings already cover isn't kept as her link (whoever's tag
+                // or ID is in it): her own is used for the shop link inside it.
                 $found = detect_affiliate_link($fields['affiliateUrl']);
                 if ($found && affiliate_link_redundant($found, $data['settings']['affiliate'])) {
                     $fields['affiliateUrl'] = '';
+                    if (!is_string($fields['url'] ?? null) || $fields['url'] === '') {
+                        $fields['url'] = $found['destination'];
+                    }
                 }
             }
             $item = normalize_item(['id' => new_id('i'), 'status' => 'wishing', 'createdAt' => iso_now(),
@@ -499,32 +545,45 @@ function act_items_reorder(array $in): array
 }
 
 /**
- * Fetches photos for items that don't have one, starting new ones for ~12 seconds per call.
- * The UI calls again while "remaining" > 0, passing the ids that failed as "exclude".
+ * Fetches photos for items that don't have one, starting new ones for ~12 seconds per call, or
+ * at most "limit" of them. The UI calls again while "remaining" > 0, passing the ids that failed
+ * as "exclude". "auto" is the Control Room's background fetch, with stricter rules (see
+ * photo_fetch_wanted). Each item is marked as looked-at just before it's tried, so a phone and a
+ * laptop open at once don't fetch the same photo twice. Failures carry the shop's name, whether
+ * it blocked the lookup, and how often this link has been tried (the summary names new misses only).
  */
 function act_items_fetch_images(array $in): array
 {
     @set_time_limit(90);
     $exclude = array_flip(array_filter((array)($in['exclude'] ?? []), 'valid_id'));
     $only = array_flip(array_filter((array)($in['ids'] ?? []), 'valid_id'));
+    $auto = ($in['auto'] ?? false) === true;
+    $limit = max(0, min(50, (int)($in['limit'] ?? 0))); // 0: as many as fit in the time
     $data = load_data();
-    $todo = array_values(array_filter($data['items'], function ($item) use ($exclude, $only) {
-        return $item['image'] === '' && $item['status'] !== 'archived'
-            && ($item['imageSource'] !== '' || $item['url'] !== '')
+    $now = time();
+    $todo = array_values(array_filter($data['items'], function ($item) use ($exclude, $only, $auto, $now) {
+        return photo_fetch_wanted($item, $auto, $now)
             && !isset($exclude[$item['id']]) && (!$only || isset($only[$item['id']]));
     }));
     $started = microtime(true);
     $done = [];
     $failed = [];
     foreach ($todo as $n => $item) {
-        if (microtime(true) - $started > 12) {
+        if (($limit && count($done) + count($failed) >= $limit) || microtime(true) - $started > 12) {
             break;
         }
+        unset($todo[$n]);
+        $item = claim_photo_fetch($item['id'], $auto);
+        if ($item === null) {
+            continue; // deleted, given a photo meanwhile, or another device is already on it
+        }
+        $blocked = false;
         try {
             $source = $item['imageSource'];
             if ($source === '') {
                 $info = inspect_link($item['url']);
                 $source = $info['image'];
+                $blocked = $info['blocked'];
                 if ($source === '') {
                     throw new RuntimeException($info['error'] ?: 'No photo on the page.');
                 }
@@ -532,11 +591,47 @@ function act_items_fetch_images(array $in): array
             attach_image_from_url($item['id'], $source);
             $done[] = $item['id'];
         } catch (RuntimeException $e) {
-            $failed[] = ['id' => $item['id'], 'name' => $item['name'], 'error' => $e->getMessage()];
+            $failed[] = ['id' => $item['id'], 'name' => $item['name'], 'error' => $e->getMessage(),
+                'store' => store_name($item['url'] ?: $item['imageSource']), 'blocked' => $blocked,
+                'tries' => $item['imageFetch']['tries']];
         }
-        unset($todo[$n]);
     }
     return ['done' => $done, 'failed' => $failed, 'remaining' => count($todo)];
+}
+
+/**
+ * Whether a photo fetch should look for this item's photo. The background fetch ($auto) also skips
+ * items that ever had a photo (one she removed stays removed), and tries each link a few times at
+ * most, a day apart: a shop that always blocks isn't asked (or reported) every day.
+ */
+function photo_fetch_wanted(array $item, bool $auto, int $now): bool
+{
+    if ($item['image'] !== '' || $item['status'] === 'archived' || ($item['imageSource'] === '' && $item['url'] === '')) {
+        return false;
+    }
+    $fetch = $item['imageFetch'];
+    return !$auto || $fetch === null
+        || (!$fetch['had'] && $fetch['tries'] < PHOTO_AUTO_TRIES
+            && ($fetch['at'] === null || $now - (int)strtotime($fetch['at']) >= PHOTO_RETRY_SECONDS));
+}
+
+/** Marks item $id's photo as looked for now, if it still wants one. Answers the item as it is now, or null. */
+function claim_photo_fetch(string $id, bool $auto): ?array
+{
+    return mutate_data(function (array &$data) use ($id, $auto) {
+        $index = item_index($data, $id);
+        if ($index === null || !photo_fetch_wanted($data['items'][$index], $auto, time())) {
+            return null;
+        }
+        $item = $data['items'][$index];
+        $data['items'][$index]['imageFetch'] = [
+            'at' => iso_now(),
+            'tries' => ($item['imageFetch']['tries'] ?? 0) + 1,
+            'had' => $item['imageFetch']['had'] ?? false,
+            'for' => image_fetch_key($item['url'], $item['imageSource']),
+        ];
+        return $data['items'][$index];
+    });
 }
 
 function act_item_delete(array $in): array
@@ -896,7 +991,8 @@ function affiliate_patch(array $old, array $patch): array
     foreach (is_array($patch['amazon'] ?? null) ? $patch['amazon'] : [] as $market => $tag) {
         $tag = is_string($tag) ? trim($tag) : '';
         if ($tag !== '' && in_array($market, AMAZON_MARKETPLACES, true) && !preg_match(AMAZON_TAG_PATTERN, $tag)) {
-            json_fail(400, '“' . clean_text($tag, 40) . '” doesn’t look like an Amazon tracking ID (for amazon.' . $market . '). It looks like yourname-20.');
+            json_fail(400, '“' . clean_text($tag, 40) . '” doesn’t look like an Amazon tracking ID (for amazon.' . $market
+                . '). A tracking ID is one word ending in a dash and two digits, like yourname-20 or yourname-21, shown top right in Associates Central.');
         }
     }
     $network = $next['network'];
@@ -920,20 +1016,29 @@ function affiliate_patch(array $old, array $patch): array
     return $next;
 }
 
-/** What an affiliate link is, what it would teach, and where visitors would go for that shop now. */
+/**
+ * What an affiliate link is, what it would teach, and where visitors would go for that shop now.
+ * With "shopUrl" (an item's shop link), "out" says where that item's button would go with this
+ * link as its "Your link" (a plain link there counts as the shop link, see resolve_outbound).
+ */
 function act_affiliate_detect(array $in): array
 {
     $url = unwrap_google_link(trim(is_string($in['url'] ?? null) ? $in['url'] : ''));
     $found = detect_affiliate_link($url);
     $product = clean_url($found && $found['destination'] !== '' ? $found['destination'] : $url);
-    return [
+    $settings = load_data()['settings'];
+    $answer = [
         'detected' => $found,
         'suggestion' => learn_affiliate_link($url),
         'preview' => resolve_outbound(
             ['id' => 'preview', 'url' => $product !== '' ? clean_url(canonical_product_url($product)) : '', 'affiliateUrl' => ''],
-            load_data()['settings']
+            $settings
         ),
     ];
+    if (is_string($in['shopUrl'] ?? null)) {
+        $answer['out'] = resolve_outbound(['id' => 'preview', 'url' => clean_url(normalize_link(trim($in['shopUrl']))), 'affiliateUrl' => clean_url($url)], $settings);
+    }
+    return $answer;
 }
 
 /** "Teach it a link": one of her affiliate links becomes a rule for its shop, her Amazon tag or the catch-all. */

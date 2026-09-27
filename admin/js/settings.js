@@ -5,7 +5,7 @@
  * learned waits in a draft until "Save changes".
  */
 import {
-  h, icon, swap, sig, uid, money, currencyName, fullDateTime, deviceTimezone, plural, hostOf, extractUrl, reducedMotion,
+  h, icon, swap, sig, uid, money, currencyName, fullDateTime, deviceTimezone, plural, hostOf, extractUrl, reducedMotion, keepsFocus, focusLost,
 } from './core.js';
 import { api, store, downloadBackup } from './api.js';
 import {
@@ -396,7 +396,7 @@ export function createSettings() {
 
   const affToggle = toggle({
     label: 'Use affiliate links on the site',
-    hint: 'Off: buttons go straight to the shop. Links you added to an item as “Your link” are still used.',
+    hint: 'Off: buttons go straight to the shop. Your own links are still used: an item’s “Your link”, or an affiliate link pasted as its shop link.',
     onChange: (v) => { draft.affiliate.enabled = v; sync(); },
   });
   const clicksAside = h('span', { class: 'card-aside mono' });
@@ -507,16 +507,23 @@ export function createSettings() {
       const label = learn.rule ? `Use it for all ${learn.domain} links${instead}`
         : learn.amazon ? `Save ${Object.values(learn.amazon)[0]} as your Amazon tag${instead}` : `Use ${network} for every other shop${instead}`;
       const use = button(label, { kind: 'primary', size: 'sm', iconName: 'sparkle', className: 'btn-wrap' });
-      use.addEventListener('click', () => busy(use, async () => {
-        try {
-          const done = await api('affiliate.learn', { url: link });
-          teachIn.value = '';
-          teachResult.replaceChildren(note('ok', h('p', { text: `Learned: ${done.applied}. Visitors go through it from now on.` })));
-          toast(`Learned: ${done.applied}.`, { tone: 'gold' });
-        } catch (err) {
-          teachResult.replaceChildren(note('error', err.message));
-        }
-      }));
+      use.addEventListener('click', (e) => {
+        const follow = keepsFocus(e);
+        busy(use, async () => {
+          try {
+            const done = await api('affiliate.learn', { url: link });
+            teachIn.value = '';
+            const msg = note('ok', h('p', { text: `Learned: ${done.applied}. Visitors go through it from now on.` }));
+            msg.tabIndex = -1;
+            const lost = follow && focusLost(teachResult);
+            teachResult.replaceChildren(msg);
+            if (lost) msg.focus({ preventScroll: true }); // the button it replaced had the keyboard
+            toast(`Learned: ${done.applied}.`, { tone: 'gold' });
+          } catch (err) {
+            teachResult.replaceChildren(note('error', err.message));
+          }
+        });
+      });
       body.push(h('div', { class: 'button-row learn-row' }, use));
     } else if (plainShort) {
       body.push(h('p', { text: 'A short link hides the shop it leads to, so there’s no pattern to learn. If it’s your link for one product, paste it into that item’s “Your link”.' }));
@@ -546,16 +553,18 @@ export function createSettings() {
       return a.network && a.network !== 'none' ? 'other' : null;
     }
     if (learn.rule) {
-      if ((a.exclude || []).some((d) => learn.domain === d || learn.domain.endsWith(`.${d}`))) return 'excluded';
-      const rules = (a.rules || []).filter((r) => r.domains.includes(learn.domain));
-      if (rules.some((r) => r.mode === learn.rule.mode && r.value === learn.rule.value)) return 'same';
-      return rules.length ? 'other' : null;
+      // Matched like the server does: a shop's domain or any subdomain of it, and the first rule that matches wins.
+      const covers = (d) => learn.domain === d || learn.domain.endsWith(`.${d}`);
+      if ((a.exclude || []).some(covers)) return 'excluded';
+      const rule = (a.rules || []).find((r) => r.domains.some(covers));
+      if (!rule) return null;
+      return rule.mode === learn.rule.mode && rule.value === learn.rule.value ? 'same' : 'other';
     }
     return null;
   }
 
   // What it has learned, shop by shop. Deleting one saves straight away (with an undo).
-  const rulesBox = h('div', { class: 'aff-rules' });
+  const rulesBox = h('div', { class: 'aff-rules', tabindex: '-1' }); // takes the keyboard when the last rule is deleted
   let rulesSig = '';
   function renderRules(s) {
     const rules = (s.settings.affiliate && s.settings.affiliate.rules) || [];
@@ -574,15 +583,21 @@ export function createSettings() {
           h('span', { class: 'aff-rule-meta', text: `${rule.domains.join(', ')} · ${rule.mode === 'wrap' ? 'deep link' : 'extra parameters'}` })),
         h('button', {
           class: 'icon-btn danger', type: 'button', 'aria-label': `Delete ${rule.label}`, title: 'Delete', dataset: { key: `rule-del:${rule.id}` },
-          onclick: (e) => deleteRule(rule, e.currentTarget),
+          onclick: (e) => deleteRule(rule, e.currentTarget, keepsFocus(e)),
         }, icon('trash'))))));
   }
-  async function deleteRule(rule, btn) {
+  async function deleteRule(rule, btn, follow = false) {
     const rules = store.state.settings.affiliate.rules;
     const index = rules.findIndex((r) => r.id === rule.id);
+    const neighbour = rules[index + 1] || rules[index - 1] || null; // gets the keyboard once this one's gone
     btn.disabled = true;
     try {
       await api('settings.save', { settings: { affiliate: { rules: rules.filter((r) => r.id !== rule.id) } } });
+      // The list has been redrawn without it: the keyboard goes to the next rule's delete (or the list).
+      if (follow && focusLost(rulesBox)) {
+        const next = neighbour && rulesBox.querySelector(`[data-key="${CSS.escape(`rule-del:${neighbour.id}`)}"]`);
+        (next || rulesBox).focus({ preventScroll: true });
+      }
       toast(`Deleted ${rule.label}.`, {
         action: async () => {
           const now = store.state.settings.affiliate.rules.filter((r) => r.id !== rule.id);
@@ -609,7 +624,7 @@ export function createSettings() {
   const excludeGroup = h('fieldset', { class: 'copy-group' },
     h('legend', { class: 'group-label', text: 'Never use affiliate links for' }),
     excludeIn,
-    h('p', { class: 'field-hint', text: 'Shops’ web addresses, one per line. Their buttons stay plain links (your own links on items still count).' }));
+    h('p', { class: 'field-hint', text: 'Shops’ web addresses, one per line. Their buttons stay plain links, except where an item has your own link (its “Your link”, or an affiliate link pasted as its shop link).' }));
 
   let disclosureGroup = null;
   if (meta.copyFields.affiliateNote) {
@@ -628,7 +643,7 @@ export function createSettings() {
     h('ul', { class: 'signup-list' }, SIGN_UP.map(([name, href, what]) => h('li', null,
       h('a', { href, target: '_blank', rel: 'noopener' }, name, icon('external')),
       h('span', { class: 'muted', text: what })))));
-  const grabGroup = h('div', { class: 'copy-group' },
+  const grabGroup = h('div', { class: 'copy-group grab-group' }, // hidden on touch screens: bookmarks bars are a desktop thing
     h('h3', { class: 'group-label', text: 'Grab from any shop page' }),
     bookmarkletLink());
 
@@ -871,10 +886,12 @@ export function createSettings() {
   }
 
   function update(s) {
-    const next = sig(s.settings, s.items.map((i) => [i.id, i.name, i.brand, i.status, i.currency, i.priceBase]), s.clicksTotal);
+    const next = sig(s.settings, s.items.map((i) => [i.id, i.name, i.brand, i.status, i.currency, i.priceBase]), s.clicksTotal, s.clicksCapped);
     if (next === stateSig) return;
     stateSig = next;
-    clicksAside.textContent = s.clicksTotal ? `${plural(s.clicksTotal, 'click')} so far` : '';
+    // Past the day's limit (a flood of "visitors"), clicks stop being counted until tomorrow.
+    clicksAside.textContent = [s.clicksTotal ? `${plural(s.clicksTotal, 'click')} so far` : '', s.clicksCapped ? 'counting paused for today' : ''].filter(Boolean).join(' · ');
+    clicksAside.title = s.clicksCapped ? 'So many clicks today that counting stopped (daily limit). It starts again tomorrow.' : '';
     if (!draft || !isDirty()) {
       fill(s);
     } else {

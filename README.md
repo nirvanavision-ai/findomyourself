@@ -40,7 +40,7 @@ An affiliate or creator link pasted as a new item is recognized: it becomes the 
 it is read as usual, and the editor offers to learn the shop (or save your Amazon tag). While any button uses an
 affiliate link, the page shows a disclosure at the bottom (plus Amazon's required sentence when Amazon links show),
 a small "Affiliate link" caption under that button, and marks the link `rel="sponsored"`. Clicks are counted per
-item: once per visitor per day, bots ignored, IPs never stored.
+item: once per visitor per day (up to 20 items a day per visitor), bots ignored, IPs never stored.
 
 Everything is set in **Control Room → Settings → Affiliate links**; an item's own link goes in **Your link** in
 its editor, which also shows where visitors go and how often they click. The owner's step-by-step setup is in
@@ -78,7 +78,7 @@ No build step: PHP renders the page with its data inline, and plain ES modules t
 index.php            the page (data inline as JSON, meta/OG, CSP) and the passcode gate for private mode
 api/state.php        public state as JSON (ETag, so polling costs a 304 when nothing changed)
 api/whip.php         counts whip cracks (rate-limited per visitor, IPs are never stored)
-api/click.php        counts clicks on shop buttons (once per visitor per item per day, IPs are never stored)
+api/click.php        counts clicks on shop buttons (once per visitor per item per day, up to 20 items; no IPs stored)
 admin/               the Control Room: index.php (setup, sign-in), api.php (every action), the UI
 lib/store.php        the data model: items, commands, fines, ledger, session, settings, stats, streaks, the goal
 lib/seed.php         first-run content: the 12 wishlist items, default commands, fines and voice lines

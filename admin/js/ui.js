@@ -27,10 +27,10 @@ export function rehomeToasts() {
 
 /**
  * toast('Good. Again.', {tone: 'gold', detail: '🏋️ Gym session · +$15', action: fn, actionLabel: 'Undo'})
- * Tones: info, gold (money in), pink (money out), error.
+ * Tones: info, gold (money in), pink (money out), warn (done, but not all of it), error. stacked: the button goes under a longer message.
  */
 export function toast(message, opts = {}) {
-  const { tone = 'info', detail = '', action = null, actionLabel = 'Undo' } = opts;
+  const { tone = 'info', detail = '', action = null, actionLabel = 'Undo', stacked = false } = opts;
   const duration = opts.duration || (action ? 7000 : tone === 'error' ? 6500 : 3800);
   rehomeToasts();
 
@@ -38,7 +38,7 @@ export function toast(message, opts = {}) {
   let left = duration;
   let startedAt = 0;
   let paused = false;
-  const node = h('div', { class: ['toast', `toast-${tone}`], role: tone === 'error' ? 'alert' : null });
+  const node = h('div', { class: ['toast', `toast-${tone}`, stacked && action && 'toast-stacked'], role: tone === 'error' ? 'alert' : null });
   const dismiss = () => {
     clearTimeout(timer);
     if (!node.isConnected || node.classList.contains('is-leaving')) return;
@@ -59,7 +59,7 @@ export function toast(message, opts = {}) {
     left = Math.max(1500, left - (Date.now() - startedAt));
   };
   append(node, [
-    h('span', { class: 'toast-glyph', 'aria-hidden': 'true' }, icon(tone === 'error' ? 'warn' : tone === 'pink' ? 'bolt' : tone === 'gold' ? 'sparkle' : 'check')),
+    h('span', { class: 'toast-glyph', 'aria-hidden': 'true' }, icon(tone === 'error' || tone === 'warn' ? 'warn' : tone === 'pink' ? 'bolt' : tone === 'gold' ? 'sparkle' : 'check')),
     h('span', { class: 'toast-text' },
       h('span', { class: 'toast-msg', text: message }),
       detail && h('span', { class: 'toast-detail', text: detail })),

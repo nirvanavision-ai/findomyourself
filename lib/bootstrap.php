@@ -5,6 +5,7 @@
  * Storage (never tracked by Git, so code deploys never touch it):
  *   <private>/data.json        wishlist, ledger, rules and settings
  *   <private>/whips.json       crack-the-whip counters
+ *   <private>/clicks.json      clicks on items' shop buttons
  *   <private>/auth.json        admin password hash + failed sign-in log
  *   <private>/setup-code.txt   one-time code for creating the admin password
  *   <private>/secret.key       signs the viewer cookie when the site is private

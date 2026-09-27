@@ -93,7 +93,7 @@ function render(id, fresh) {
 
   const actions = el('div', { class: 'modal__actions' });
   if (item.link) {
-    actions.append(shopButton(item, { class: `btn ${item.affordable ? 'btn--gold' : 'btn--ghost'}`, 'data-cursor': 'Shop' },
+    actions.append(shopButton(item, { class: `btn ${item.affordable ? 'btn--gold' : 'btn--ghost'}`, 'data-cursor': 'Shop', 'data-key': 'shop' },
       item.affordable ? `Buy it at ${item.store || 'the store'}` : `Look, don’t touch · ${item.store || 'store'}`, svg(icons.arrow)));
     actions.querySelector('svg').setAttribute('width', '14');
   }
@@ -113,12 +113,17 @@ function render(id, fresh) {
   );
 
   const content = el('div', { class: 'modal__grid' }, media, body);
-  const close = el('button', { class: 'modal__close', type: 'button', 'aria-label': 'Close', text: '✕', on: { click: () => dialog.close() } });
+  const close = el('button', { class: 'modal__close', type: 'button', 'aria-label': 'Close', text: '✕', 'data-key': 'close', on: { click: () => dialog.close() } });
   const nav = order.length > 1 ? [
-    el('button', { class: 'modal__nav modal__nav--prev', type: 'button', 'aria-label': 'Previous item', text: '←', on: { click: () => step(-1) } }),
-    el('button', { class: 'modal__nav modal__nav--next', type: 'button', 'aria-label': 'Next item', text: '→', on: { click: () => step(1) } }),
+    el('button', { class: 'modal__nav modal__nav--prev', type: 'button', 'aria-label': 'Previous item', text: '←', 'data-key': 'prev', on: { click: () => step(-1) } }),
+    el('button', { class: 'modal__nav modal__nav--next', type: 'button', 'aria-label': 'Next item', text: '→', 'data-key': 'next', on: { click: () => step(1) } }),
   ] : [];
+  // The rebuild (new data, or ← →) drops keyboard focus: put it back on the same control (data-key),
+  // or on Close when that control is gone, so a keyboard user keeps their place in the dialog.
+  const active = document.activeElement;
+  const key = active !== dialog && dialog.contains(active) ? active.dataset.key || 'close' : null;
   clear(dialog).append(content, close, ...nav);
+  if (key) (dialog.querySelector(`[data-key="${key}"]`) || close).focus({ preventScroll: true });
 }
 
 function fact(label, value) {
@@ -136,7 +141,7 @@ export function shopButton(item, props, ...children) {
   }, ...children);
   if (!item.affiliate) return link;
   return el('span', { class: 'cta' }, link,
-    el('a', { class: 'btn__caption', href: '#disclosure', 'aria-label': 'Affiliate link: what that means', on: { click: toDisclosure } }, 'Affiliate link'));
+    el('a', { class: 'btn__caption', href: '#disclosure', 'aria-label': 'Affiliate link: what that means', 'data-key': 'caption', on: { click: toDisclosure } }, 'Affiliate link'));
 }
 
 /** Out of the dialog first, so the page can scroll down to the disclosure. */

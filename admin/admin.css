@@ -635,6 +635,35 @@ details[open] > .disclosure::before { transform: rotate(45deg); }
 .add-top .icon { width: 20px; height: 20px; stroke-width: 2.4; }
 .add-top:hover { box-shadow: inset 0 1px 0 rgba(255,255,255,.5), 0 0 0 3px rgba(255,46,110,.22), 0 10px 26px -8px rgba(255,46,110,.95); }
 .add-top:active { transform: scale(.94); }
+/* "Fetching 3 photos…": missing photos downloading in the background (js/bulk.js). A spinning
+   ring round a photo glyph; the words join it where the bar has room. */
+.photo-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  min-height: 32px;
+  padding: 0 11px 0 3px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(255,255,255,.03);
+  color: var(--muted);
+  font: 500 12px/1 var(--mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  animation: pop-in .2s var(--ease);
+}
+.photo-status-ring { position: relative; display: grid; place-items: center; width: 26px; height: 26px; flex: none; color: var(--gold); }
+.photo-status-ring .icon { width: 14px; height: 14px; }
+.photo-status-ring::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1.5px solid rgba(233,189,102,.2);
+  border-top-color: var(--gold);
+  animation: spin 1.1s linear infinite;
+}
 
 .top-tabs, .top-link { display: none; }
 .tab { position: relative; border: 0; background: none; cursor: pointer; }
@@ -1298,6 +1327,8 @@ body:has(.view:not([hidden]) .savebar:not([hidden])) > .toasts { top: calc(var(-
 .toast-pink .toast-glyph { color: var(--latex-2); }
 .toast-error { border-color: rgba(255,46,110,.7); background: rgba(42,11,22,.98); }
 .toast-error .toast-glyph { color: var(--latex-2); }
+.toast-warn { border-color: rgba(233,189,102,.45); }
+.toast-warn .toast-glyph { color: var(--gold); }
 .toast-action {
   min-height: 40px;
   padding: 0 14px;
@@ -1314,6 +1345,12 @@ body:has(.view:not([hidden]) .savebar:not([hidden])) > .toasts { top: calc(var(-
 .toast-close { display: grid; place-items: center; width: 38px; height: 40px; padding: 0; border: 0; border-radius: 10px; background: none; color: var(--dim); cursor: pointer; }
 .toast-close:hover { color: var(--text); }
 .toast-close .icon { width: 16px; height: 16px; }
+/* A longer message gets the width, its button sits underneath (the photo fetch's summary). */
+.toast-stacked { grid-template-columns: 22px minmax(0, 1fr) auto; align-items: start; row-gap: 8px; padding-bottom: 12px; }
+.toast-stacked .toast-glyph { padding-top: 10px; }
+.toast-stacked .toast-text { padding-top: 9px; }
+.toast-stacked .toast-action { grid-column: 2; grid-row: 2; justify-self: start; min-height: 36px; }
+.toast-stacked .toast-close { grid-column: 3; grid-row: 1; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(14px) scale(.98); } }
 @keyframes toast-out { to { opacity: 0; transform: translateY(8px); } }
 
@@ -1465,6 +1502,8 @@ dialog.sheet::backdrop { background: rgba(6,3,5,.72); -webkit-backdrop-filter: b
 .learn-offer, .learn-row { margin-top: 10px; }
 .learn-done { display: flex; align-items: center; gap: 8px; color: var(--gold); font-weight: 600; }
 .learn-done .icon { width: 17px; height: 17px; }
+/* Messages and lists that take the keyboard after the button in them is gone: no ring for a tap. */
+.learn-done:focus:not(:focus-visible), .teach-result .note:focus:not(:focus-visible), .aff-rules:focus:not(:focus-visible) { outline: none; }
 .form-section { margin-top: 8px; padding-top: 20px; border-top: 1px solid var(--line); }
 .status-box { display: grid; gap: 16px; }
 .claim-area:empty { display: none; }
@@ -1632,7 +1671,7 @@ dialog.sheet::backdrop { background: rgba(6,3,5,.72); -webkit-backdrop-filter: b
 
 @media (pointer: coarse) {
   .add-top { width: 44px; height: 44px; }
-  .sheet-add .grab-box { display: none; } /* bookmarks bars are a desktop thing */
+  .sheet-add .grab-box, .aff-card .grab-group { display: none; } /* bookmarks bars are a desktop thing */
   .btn-sm, .chip, .toast-action { min-height: 44px; }
   .toast-close { width: 44px; height: 44px; }
   .seg-label { min-height: 44px; }
@@ -1641,6 +1680,13 @@ dialog.sheet::backdrop { background: rgba(6,3,5,.72); -webkit-backdrop-filter: b
 
 @media (max-width: 479px) {
   .pill-label { display: none; } /* the colour and the sign say it all on a phone */
+}
+
+@media (max-width: 599px) {
+  /* The photo status is just its spinning ring (tap it for the words): the brand keeps its room. */
+  .photo-status { min-height: 0; padding: 0; border: 0; background: none; }
+  .photo-status-ring { width: 30px; height: 30px; }
+  .photo-status-text { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); }
 }
 
 @media (max-width: 380px) {

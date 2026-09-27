@@ -213,9 +213,14 @@ function import_row(array $cells, string $category): array
 function finish_import_item(array $item, array $knownBrands): array
 {
     // A pasted affiliate or creator link (Awin, ShopMy, an Amazon link with a tag…) is kept as her own
-    // link, and the shop link inside it, when it names one, becomes the product link.
+    // link, and the shop link inside it, when it names one, becomes the product link. (The import
+    // drops it again when her settings already cover it: see act_items_import.) A link through a
+    // site we don't know by name ("…?url=…") may only be a redirect: just the shop link is kept.
     $found = $item['url'] !== '' ? detect_affiliate_link($item['url']) : null;
-    if ($found && $found['network'] !== 'Short link') {
+    $pasted = $item['url'];
+    if ($found && $found['network'] === 'Affiliate network') {
+        $item['url'] = $found['destination'];
+    } elseif ($found && $found['network'] !== 'Short link') {
         $item['affiliateUrl'] = clean_url($item['url']);
         if ($found['destination'] !== '') {
             $item['url'] = $found['destination'];
@@ -223,7 +228,7 @@ function finish_import_item(array $item, array $knownBrands): array
     }
     $name = strip_markdown($item['name']);
     if ($name === '' && $item['url'] !== '') { // a bare link: "Amazon find" when the link has no words in it
-        $name = name_from_url($item['url']) ?: trim(store_name($item['url']) . ' find');
+        $name = name_from_url($item['url']) ?: name_from_url($pasted) ?: trim(store_name($item['url']) . ' find');
     }
     // "(White)" at the end is the variant.
     if (preg_match('/^(.+?)\s*\(([^()]{1,60})\)\s*$/u', $name, $m)) {

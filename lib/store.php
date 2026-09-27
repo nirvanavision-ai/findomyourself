@@ -261,6 +261,23 @@ function normalize_item($raw, array $settings): ?array
     }
     $priority = (int)($raw['priority'] ?? 2);
     $status = in_array($raw['status'] ?? '', ITEM_STATUSES, true) ? $raw['status'] : 'wishing';
+    // A shop link saved through Google's or a social site's redirect (older versions kept those) is the link inside it.
+    $url = clean_url(unwrap_google_link(is_string($raw['url'] ?? null) ? $raw['url'] : ''));
+    $imageSource = clean_url($raw['imageSource'] ?? '');
+    // What the photo fetch remembers (null until there's something): whether the item has ever had
+    // a stored photo (had), and how often its photo was looked for at its current link (tries, the
+    // last one at "at"; "for" tells a new link, which starts afresh). The Control Room's automatic
+    // fetch leaves alone items that had a photo (a removed photo stays removed) and tries each link
+    // three times at most, a day apart (see photo_fetch_wanted in admin/api.php).
+    $fetch = is_array($raw['imageFetch'] ?? null) ? $raw['imageFetch'] : [];
+    $for = image_fetch_key($url, $imageSource);
+    $same = ($fetch['for'] ?? null) === $for;
+    $fetch = [
+        'at' => $same ? clean_iso($fetch['at'] ?? null) : null,
+        'tries' => $same ? max(0, min(99, (int)($fetch['tries'] ?? 0))) : 0,
+        'had' => $image !== '' || ($fetch['had'] ?? false) === true,
+        'for' => $for,
+    ];
     return [
         'id' => valid_id($raw['id'] ?? null) ? $raw['id'] : new_id('i'),
         'name' => $name,
@@ -269,16 +286,23 @@ function normalize_item($raw, array $settings): ?array
         'category' => clean_text($raw['category'] ?? '', 60),
         'price' => max(0.0, min((float)MAX_AMOUNT, money($raw['price'] ?? 0))),
         'currency' => $currency,
-        'url' => clean_url($raw['url'] ?? ''),
+        'url' => $url,
         'affiliateUrl' => clean_url($raw['affiliateUrl'] ?? ''), // her own link, kept exactly (its parameters are the point)
         'image' => $image,
-        'imageSource' => clean_url($raw['imageSource'] ?? ''),
+        'imageSource' => $imageSource,
+        'imageFetch' => ($fetch['at'] !== null || $fetch['had']) ? $fetch : null,
         'priority' => max(1, min(3, $priority)),
         'note' => clean_text($raw['note'] ?? '', 400, true),
         'status' => $status,
         'createdAt' => clean_iso($raw['createdAt'] ?? null) ?? iso_now(),
         'claimedAt' => $status === 'claimed' ? (clean_iso($raw['claimedAt'] ?? null) ?? iso_now()) : null,
     ];
+}
+
+/** Which links an item's photo was looked for at (see imageFetch in normalize_item). */
+function image_fetch_key(string $url, string $imageSource): string
+{
+    return hash('crc32b', $url . ' ' . $imageSource);
 }
 
 /** Commands and fines share a shape: {id, name, emoji, amount}. */

@@ -4,7 +4,9 @@
  *
  * Where a visitor's shop button goes (resolve_outbound), first match wins:
  *   1. the owner's own link for the item ("Your link": ShopMy, LTK, Amazon SiteStripe, an Awin deep link…),
- *      or a shop link that already is an affiliate link (never wrapped twice)
+ *      or a shop link that already is an affiliate link (never wrapped twice). A plain link in "Your
+ *      link" (the shop link again, an Amazon product without a tag) counts as the shop link instead,
+ *      and a Skimlinks/Sovrn link as the shop link gives way to her own catch-all.
  *   2. the plain shop link, when affiliate links are off or the shop is on the "never" list
  *   3. Amazon: the product with her Associates tag for that marketplace (never through a network)
  *   4. a rule she taught it for that shop: a deep-link template ("…&ued={url}") or extra parameters
@@ -14,9 +16,11 @@
  * nothing here fetches anything: pasted affiliate links are recognized by their shape alone.
  *
  * <private>/clicks.json counts visitors' clicks on those buttons:
- *   items  {id: {total, days: {Y-m-d: n}, last}}   the last 90 days per item
- *   seen   {Y-m-d: {hash: 1}}                      who already counted today (today and yesterday only)
- *   rate   {hash: {t, n}}                          counted clicks per visitor in the last 10 minutes
+ *   items   {id: {total, days: {Y-m-d: n}, last}}   the last 90 days per item
+ *   seen    {Y-m-d: {hash: 1, k…: n}}               who already counted for which item, and how many items
+ *                                                   each visitor counted (today and yesterday only)
+ *   rate    {hash: {t, n}}                          counted clicks per visitor in the last 10 minutes
+ *   capped  Y-m-d                                   the last day the daily cap stopped the counting
  * Visitors are told apart by a salted hash, never a stored IP.
  */
 declare(strict_types=1);
@@ -71,19 +75,26 @@ const CREATOR_LINK_HOSTS = [
     'liketk.it' => 'LTK', 'shopltk.com' => 'LTK', 'rstyle.me' => 'LTK',
     'howl.me' => 'Howl', 'howl.link' => 'Howl',
     'geni.us' => 'Geniuslink',
+    'tidd.ly' => 'Awin', 'shopstyle.it' => 'ShopStyle', // the networks' own short links
 ];
 const SHORT_LINK_HOSTS = ['bit.ly', 'tinyurl.com', 't.co', 'ow.ly', 'buff.ly', 'rebrand.ly', 'cutt.ly', 'lnk.to'];
 /* eBay Partner Network adds these to eBay's own links (customid is per link, so it isn't learned). */
 const EBAY_PARTNER_PARAMS = ['mkcid', 'mkrid', 'siteid', 'campid', 'toolid', 'mkevt'];
 /* Query keys that often carry the real destination in networks we don't know by name. */
 const DESTINATION_KEYS = ['url', 'u', 'murl', 'ued', 'dest', 'destination', 'redirect', 'target', 'link'];
+/* CJ's deep links that carry the shop link at the end of their path: [1] up to it, [2] the PID, [3] the shop link. */
+const CJ_PATH_LINK = '#^(https?://[^/?\#]+/links/(\d+)/type/dlg/(?:sid/[^/]+/)?)(https?(?::|%3A).+)$#i';
+const CJ_PATH_TEMPLATE = '#/links/\d+/type/dlg/(?:sid/[^/]+/)?\{url\}$#';
 
 const CLICK_WINDOW = 600;
 const CLICK_MAX_PER_WINDOW = 60;
 const CLICK_KEEP_DAYS = 90;
 const CLICK_MAX_SEEN_PER_DAY = 5000; // a flood of "visitors" stops being counted instead of growing the file
+const CLICK_MAX_ITEMS_PER_VISITOR = 20; // per local day, so a few addresses can't use up the day's 5000
 const CLICK_MAX_VISITORS = 1000;
-const CLICK_BOT_PATTERN = '/bot|crawl|spider|slurp|preview|facebookexternalhit|embedly|quora|pinterest|whatsapp|telegram|discord|curl|wget|python|headless/i';
+// Crawlers and link previews by their own names (Pinterestbot, TelegramBot, Discordbot all say "bot"),
+// not the apps: Pinterest's and Telegram's in-app browsers carry the app's name in a real browser's.
+const CLICK_BOT_PATTERN = '/bot|crawl|spider|slurp|preview|facebookexternalhit|embedly|quora|whatsapp|curl|wget|python|headless/i';
 
 /* ───────────────────────── links ───────────────────────── */
 
@@ -189,6 +200,12 @@ function set_query_param(string $url, string $key, string $value): string
     return $base . '?' . implode('&', $pairs) . $fragment;
 }
 
+/** A link to compare with another: lowercase, without scheme, "www.", tracking or a trailing slash. */
+function link_key(string $url): string
+{
+    return rtrim((string)preg_replace('#^https?://(www\.)?#', '', strtolower(normalize_link(trim($url)))), '/');
+}
+
 /** $url without ?$key, keeping everything else as it was. */
 function remove_query_param(string $url, string $key): string
 {
@@ -209,14 +226,26 @@ function remove_query_param(string $url, string $key): string
 function resolve_outbound(array $item, array $settings): array
 {
     $mine = (string)($item['affiliateUrl'] ?? '');
+    $url = (string)($item['url'] ?? '');
     if ($mine !== '') {
+        // Her link as it is, unless it's a plain link that earns nothing: the shop link again, or an
+        // Amazon product without a tag. That goes out as a shop link would, with her tag or network.
+        $same = $url !== '' && link_key($mine) === link_key($url);
+        $plainAmazon = amazon_marketplace($mine) !== null && amazon_asin($mine) !== null;
+        if (($same || $plainAmazon) && detect_affiliate_link($mine) === null) {
+            return resolve_outbound(['url' => $same ? $url : $mine, 'affiliateUrl' => ''] + $item, $settings);
+        }
         return own_outbound($mine);
     }
-    $url = (string)($item['url'] ?? '');
     if ($url === '') {
         return outbound_link('', 'none', 'No link');
     }
     $a = is_array($settings['affiliate'] ?? null) ? $settings['affiliate'] : [];
+    $found = detect_affiliate_link($url);
+    if ($found && $found['kind'] === 'wrapper' && own_affiliate_id($found, $a) !== '') {
+        // Someone's Skimlinks or Sovrn link typed in as the shop link: her own catch-all takes its place.
+        return resolve_outbound(['url' => $found['destination'], 'affiliateUrl' => ''] + $item, $settings);
+    }
     $host = link_host($url);
     $on = !empty($a['enabled']) && !host_matches($host, (array)($a['exclude'] ?? []));
     $market = amazon_marketplace($url);
@@ -224,7 +253,6 @@ function resolve_outbound(array $item, array $settings): array
     // A shop link that is itself an affiliate or creator link (typed in as the shop link, or left
     // behind when "Your link" was cleared) goes out as it is, like her own link: wrapping it again
     // would break it. Only an Amazon link is rewritten, to carry her own tag.
-    $found = detect_affiliate_link($url);
     if ($found && $found['network'] !== 'Short link' && !($found['kind'] === 'amazon' && $tag !== '')) {
         return own_outbound($url, 'Affiliate link');
     }
@@ -281,11 +309,15 @@ function own_outbound(string $link, string $label = 'Your link'): array
     return outbound_link($link, 'mine', $network !== '' ? $label . ' (' . $network . ')' : $label, is_amazon_link($link));
 }
 
-/** $url through one of her rules: a deep-link template ("…&ued={url}") or extra parameters. */
+/**
+ * $url through one of her rules: a deep-link template ("…&ued={url}") or extra parameters.
+ * CJ's ".../links/<PID>/type/dlg/{url}" takes the shop link as it is, at the end of its path.
+ */
 function apply_rule(array $rule, string $url): string
 {
     if (($rule['mode'] ?? '') === 'wrap') {
-        return str_replace('{url}', rawurlencode($url), (string)($rule['value'] ?? ''));
+        $template = (string)($rule['value'] ?? '');
+        return str_replace('{url}', preg_match(CJ_PATH_TEMPLATE, $template) ? $url : rawurlencode($url), $template);
     }
     parse_str((string)($rule['value'] ?? ''), $params);
     foreach ($params as $key => $value) {
@@ -328,7 +360,8 @@ function affiliate_note(array $outbounds, array $settings): string
         return '';
     }
     $note = (string)($settings['copy']['affiliateNote'] ?? '');
-    if ($amazon && stripos($note, 'Amazon Associate') === false) {
+    // Amazon asks for its exact sentence: her own words mentioning Amazon Associates don't replace it.
+    if ($amazon && stripos((string)preg_replace('/\s+/u', ' ', $note), rtrim(AMAZON_SENTENCE, '.')) === false) {
         $note = trim($note . ' ' . AMAZON_SENTENCE);
     }
     return $note;
@@ -382,7 +415,9 @@ function detect_affiliate_link(string $url): ?array
     $market = amazon_marketplace($url);
     if ($market !== null || is_amazon_link($url)) {
         if (in_array($host, AMAZON_SHORT_HOSTS, true)) {
-            return affiliate_found('Amazon (short link)', 'short');
+            // The Amazon app's Share button makes a.co/d/…, amzn.eu/d/… and amzn.asia/d/… links, without
+            // anyone's tag: plain Amazon links. SiteStripe's short links (amzn.to) carry the tag of whoever made them.
+            return $host !== 'amzn.to' && strpos($path, '/d/') === 0 ? null : affiliate_found('Amazon (short link)', 'short');
         }
         $tag = query_value($query, 'tag');
         if ($market === null || $tag === '') {
@@ -417,7 +452,10 @@ function detect_affiliate_link(string $url): ?array
             }
         }
         $id = $idKey !== '' ? query_value($query, $idKey) : '';
-        if ($network === 'CJ' && preg_match('#/click-(\d+)-#', $path, $m)) {
+        if ($network === 'CJ' && $destination === '' && preg_match(CJ_PATH_LINK, $url, $m)) {
+            $destination = decoded_destination($m[3]); // ".../links/<PID>/type/dlg/https://shop.com/p"
+            $id = $m[2];
+        } elseif ($network === 'CJ' && preg_match('#/click-(\d+)-#', $path, $m)) {
             $id = $m[1];
         } elseif ($network === 'Impact' && preg_match('#^/c/(\d+)/#', $path, $m)) {
             $id = $m[1];
@@ -503,6 +541,9 @@ function affiliate_template(string $url, array $found): string
     if ($found['network'] === 'Partnerize') {
         $at = strpos($url, '/destination:');
         return $at === false ? '' : substr($url, 0, $at) . '/destination:{url}';
+    }
+    if ($found['network'] === 'CJ' && $found['param'] === '' && preg_match(CJ_PATH_LINK, $url, $m)) {
+        return $m[1] . '{url}';
     }
     if ($found['param'] === '') {
         return '';
@@ -601,17 +642,42 @@ function learned_label(array $learned): string
 }
 
 /**
- * A pasted affiliate link that does nothing her settings don't already do: an Amazon link with
- * the tag she saved for that marketplace, or a catch-all link with her own catch-all ID.
+ * Her own ID for what a detected link pays through, when her settings already cover it: her tag
+ * for that Amazon store, or her catch-all ID for a Skimlinks/Sovrn link to a shop. '' otherwise.
+ */
+function own_affiliate_id(array $found, array $affiliate): string
+{
+    if ($found['kind'] === 'amazon') {
+        return (string)($affiliate['amazon'][$found['marketplace']] ?? '');
+    }
+    $covered = catch_all_network($found['network']) !== '' && $found['destination'] !== ''
+        && isset(AFFILIATE_NETWORKS[(string)($affiliate['network'] ?? 'none')]);
+    return $covered ? (string)($affiliate['networkId'] ?? '') : '';
+}
+
+/**
+ * A pasted affiliate link that isn't kept as her link because her settings already cover it: an
+ * Amazon link for a store she has a tag for, or a Skimlinks/Sovrn link while she has a catch-all.
+ * Her own tag or ID is used instead, whatever the pasted link carried: a tag copied from someone
+ * else's post never wins over hers.
  */
 function affiliate_link_redundant(array $found, array $affiliate): bool
 {
-    if ($found['kind'] === 'amazon') {
-        return $found['id'] !== '' && (string)($affiliate['amazon'][$found['marketplace']] ?? '') === $found['id'];
+    return own_affiliate_id($found, $affiliate) !== '';
+}
+
+/**
+ * What a pasted Amazon short link turned out to be, judged by where it led ($landed, '' when it
+ * couldn't be followed): an Amazon Associates link with the tag it carried, or null for a plain
+ * Amazon link. Any other link, or one that wasn't followed, keeps what $found says.
+ */
+function amazon_short_link_found(string $pasted, ?array $found, string $landed): ?array
+{
+    if ($landed === '' || !in_array(link_host($pasted), AMAZON_SHORT_HOSTS, true)) {
+        return $found;
     }
-    $catchAll = catch_all_network($found['network']);
-    return $catchAll !== '' && $found['destination'] !== '' && ($affiliate['network'] ?? '') === $catchAll
-        && strcasecmp((string)$affiliate['networkId'], $found['id']) === 0;
+    $inner = detect_affiliate_link($landed);
+    return $inner && $inner['kind'] === 'amazon' ? $inner : null;
 }
 
 /* ───────────────────────── settings ───────────────────────── */
@@ -743,7 +809,7 @@ function clicks_file(): string
     return private_dir() . '/clicks.json';
 }
 
-/** clicks.json, cleaned up: ['items' => [id => {total, days, last}], 'seen' => …, 'rate' => …]. */
+/** clicks.json, cleaned up: ['items' => [id => {total, days, last}], 'seen' => …, 'rate' => …, 'capped' => Y-m-d or '']. */
 function load_clicks(): array
 {
     $raw = read_json(clicks_file(), []);
@@ -772,7 +838,14 @@ function load_clicks(): array
             $rate[(string)$key] = ['t' => (int)($entry['t'] ?? 0), 'n' => max(0, (int)($entry['n'] ?? 0))];
         }
     }
-    return ['items' => $items, 'seen' => $seen, 'rate' => $rate];
+    $capped = is_string($raw['capped'] ?? null) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $raw['capped']) ? $raw['capped'] : '';
+    return ['items' => $items, 'seen' => $seen, 'rate' => $rate, 'capped' => $capped];
+}
+
+/** Whether the daily cap stopped counting clicks today (local day), for the Control Room. */
+function clicks_capped_today(array $clicks, string $timezone): bool
+{
+    return $clicks['capped'] !== '' && $clicks['capped'] === local_day(time(), new DateTimeZone($timezone));
 }
 
 /** Clicks on one item: ['total', 'week' (the last 7 local days), 'last' (ISO time or null)]. */
@@ -801,8 +874,9 @@ function is_bot_agent(string $agent): bool
 
 /**
  * Counts this visitor's click on item $id (the caller checks that the item exists). At most once
- * per visitor, item and local day, at most 60 per visitor per 10 minutes, and never for bots.
- * Returns whether it counted; nothing is written when it didn't. Needs lib/auth.php (site_secret).
+ * per visitor, item and local day, for 20 items per visitor and day, at most 60 per visitor per
+ * 10 minutes, and never for bots. Returns whether it counted; nothing is written when it didn't,
+ * except a note, once a day, that the day's cap was reached. Needs lib/auth.php (site_secret).
  */
 function count_click(string $id, string $timezone, ?int $now = null): bool
 {
@@ -816,12 +890,17 @@ function count_click(string $id, string $timezone, ?int $now = null): bool
     $oldest = (new DateTimeImmutable($today . ' 12:00:00', $tz))->modify('-' . (CLICK_KEEP_DAYS - 1) . ' days')->format('Y-m-d');
     $secret = site_secret();
     $seenKey = substr(hash_hmac('sha256', client_key() . '|' . $id . '|' . $today, $secret), 0, 20);
+    $visitorKey = 'k' . substr(hash_hmac('sha256', client_key() . '|items|' . $today, $secret), 0, 19); // "k": never an item's hex hash
     $rateKey = substr(hash_hmac('sha256', client_key() . '|clicks', $secret), 0, 20);
 
-    return with_lock(clicks_file(), function () use ($id, $now, $today, $yesterday, $oldest, $seenKey, $rateKey) {
+    return with_lock(clicks_file(), function () use ($id, $now, $today, $yesterday, $oldest, $seenKey, $visitorKey, $rateKey) {
         $clicks = load_clicks();
         if (isset($clicks['seen'][$today][$seenKey])) {
             return false; // already counted today
+        }
+        $items = (int)($clicks['seen'][$today][$visitorKey] ?? 0);
+        if ($items >= CLICK_MAX_ITEMS_PER_VISITOR) {
+            return false;
         }
         $clicks['seen'] = array_intersect_key($clicks['seen'], [$today => true, $yesterday => true]);
         foreach ($clicks['rate'] as $key => $entry) {
@@ -835,10 +914,15 @@ function count_click(string $id, string $timezone, ?int $now = null): bool
         }
         if (count($clicks['seen'][$today] ?? []) >= CLICK_MAX_SEEN_PER_DAY
             || (!isset($clicks['rate'][$rateKey]) && count($clicks['rate']) >= CLICK_MAX_VISITORS)) {
+            if ($clicks['capped'] !== $today) { // so the Control Room can say the counts stopped
+                $clicks['capped'] = $today;
+                write_json(clicks_file(), $clicks);
+            }
             return false;
         }
         $clicks['rate'][$rateKey] = ['t' => $entry['t'], 'n' => $entry['n'] + 1];
         $clicks['seen'][$today][$seenKey] = 1;
+        $clicks['seen'][$today][$visitorKey] = $items + 1;
         $count = $clicks['items'][$id] ?? ['total' => 0, 'days' => [], 'last' => null];
         $count['total']++;
         $count['days'][$today] = ($count['days'][$today] ?? 0) + 1;

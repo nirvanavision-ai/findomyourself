@@ -73,6 +73,16 @@ check('link: ebay partner params stripped', canonical_product_url('https://www.e
 check('link: unwrap keeps her parameters', unwrap_google_link(' https://www.google.com/url?sa=t&url=https%3A%2F%2Fwww.amazon.com%2Fdp%2FB0D1XD1ZV3%3Ftag%3Dme-20%26utm_source%3Dx '), 'https://www.amazon.com/dp/B0D1XD1ZV3?tag=me-20&utm_source=x');
 check('link: instagram wrapper', unwrap_google_link('https://l.instagram.com/?u=https%3A%2F%2Fshopmy.us%2Fabc&e=AT0'), 'https://shopmy.us/abc');
 check('link: other sites untouched', unwrap_google_link('https://example.com/url?q=https://x.com'), 'https://example.com/url?q=https://x.com');
+check('link: social sites’ redirects unwrapped', array_map('unwrap_google_link', [
+    'https://www.pinterest.com/offsite/?token=123-abc&url=https%3A%2F%2Fwww.gucci.com%2Fus%2Fen%2Fpr%2Fx&pin=5',
+    'https://out.reddit.com/t3_abc?url=https%3A%2F%2Fwww.ssense.com%2Fx&token=zz&app_name=web',
+    'https://www.tiktok.com/link/v2?aid=1988&lang=en&scene=bio_url&target=https%3A%2F%2Fwww.revolve.com%2Fx%2Fdp%2FABC%2F',
+    'https://www.facebook.com/l.php?u=https%3A%2F%2Fshop.com%2Fa&h=AT0',
+    'https://www.youtube.com/redirect?event=video_description&q=https%3A%2F%2Fshop.com%2Fb&v=x',
+    'https://www.pinterest.com/pin/123/?url=https%3A%2F%2Fshop.com%2Fc',
+]), ['https://www.gucci.com/us/en/pr/x', 'https://www.ssense.com/x', 'https://www.revolve.com/x/dp/ABC/', 'https://shop.com/a', 'https://shop.com/b', 'https://www.pinterest.com/pin/123/?url=https%3A%2F%2Fshop.com%2Fc']);
+check('link: newsletter reader ids stripped', normalize_link('https://shop.com/p/x?color=red&_kx=abc.123&_hsenc=p2&_hsmi=9&ck_subscriber_id=5&sfmc_id=7&mkt_tok=q&email=me%40x.com&mc_eid=z'), 'https://shop.com/p/x?color=red');
+check('item: a stored social redirect is the shop link inside it', normalize_item(['name' => 'x', 'url' => 'https://l.instagram.com/?u=https%3A%2F%2Fwww.ssense.com%2Fx&e=AT0'], default_settings())['url'], 'https://www.ssense.com/x');
 $names = [
     'amazon' => [$amazonLink, 'Apple AirPods Pro 2nd Generation'],
     'amazon without words' => ['https://www.amazon.co.uk/gp/product/B08N5WRWNW', ''],
@@ -103,6 +113,34 @@ foreach ($names as $shop => [$url, $name]) {
     check('name: ' . $shop, name_from_url($url), $name);
 }
 check('brand: from the link', [brand_from_url($names['ssense'][0]), brand_from_url($names['net-a-porter'][0]), brand_from_url('https://www.ssense.com/en-us/women/product/chloe/tan-woody-tote/1234567')], ['Gucci', 'Gucci', 'Chloé']);
+$khaite = 'https://www.nordstrom.com/s/khaite-the-lotus-mini-bag/7654321';
+check('name: brand off a link name, the rest starts capitalised', split_brand(name_from_url($khaite)), ['Khaite', 'The Lotus Mini Bag']);
+check('name: known brand off a link name', tidy_product_name('Khaite the Lotus Mini Bag', 'Khaite', 'Nordstrom'), 'The Lotus Mini Bag');
+$pastedKhaite = parse_wishlist_text($khaite)[0] ?? [];
+check('name: bare link pasted into the list', [$pastedKhaite['brand'] ?? '', $pastedKhaite['name'] ?? ''], ['Khaite', 'The Lotus Mini Bag']);
+check('name: typed names keep their case', [split_brand('Gucci loafers'), split_brand('Apple iPhone 15'), split_brand('Saint Laurent de luxe tote')], [['Gucci', 'loafers'], ['Apple', 'iPhone 15'], ['Saint Laurent', 'De luxe tote']]);
+$codes = [
+    'hermès style code' => ['https://www.hermes.com/us/en/product/oran-sandal-H221035Z02370/', 'Oran Sandal'],
+    'balenciaga style code' => ['https://www.balenciaga.com/en-us/le-cagole-small-shoulder-bag-black-6713091VG9Y1000.html', 'Le Cagole Small Shoulder Bag Black'],
+    'louis vuitton codes' => ['https://us.louisvuitton.com/eng-us/products/neverfull-mm-monogram-nvprod430016v/M40995', 'Neverfull MM Monogram'],
+    'moncler code after its id' => ['https://www.moncler.com/en-us/women/outerwear/maya-short-down-jacket-navy-blue-I10911A00088U2833742.html', 'Maya Short Down Jacket Navy Blue'],
+    'dior codes in front' => ['https://www.dior.com/en_us/fashion/products/M0565OCEY_M928-medium-lady-d-lite-bag', 'Medium Lady D Lite Bag'],
+    'lego set number in front' => ['https://www.shop.com/products/75192-millennium-falcon', 'Millennium Falcon'],
+    'keeps a glued model name' => ['https://www.shop.com/products/case-for-iphone15pro', 'Case for Iphone15pro'],
+    'celine dotted code' => ['https://www.celine.com/en-us/celine-shop-women/handbags/teen-triomphe-bag-in-shiny-calfskin-188423BF4.38NO.html', 'Teen Triomphe Bag in Shiny Calfskin'],
+    'uppercase code in an amazon slug' => ['https://www.amazon.com/SAMSUNG-Galaxy-S24-Ultra-S928UZKAXAA/dp/B0CMDRCZBJ', 'Samsung Galaxy S24 Ultra'],
+    'keeps N°7' => ['https://www.shop.com/products/chanel-n%C2%B07', 'Chanel N°7'],
+    'keeps 1994 Tank' => ['https://amiri.com/products/amiri-1994-tank', 'Amiri 1994 Tank'],
+    'keeps Air Max 90' => ['https://www.shop.com/products/nike-air-max-90', 'Nike Air Max 90'],
+    'keeps iPhone 15 128GB' => ['https://www.walmart.com/ip/Apple-iPhone-15-128GB/5051345910', 'Apple iPhone 15 128GB'],
+    'keeps a model number' => ['https://www.shop.com/p/sony-wh-1000xm5', 'Sony WH 1000xm5'],
+    'shopify duplicate suffix still dropped' => ['https://www.shop.com/products/nike-air-max-90-1', 'Nike Air Max 90'],
+    'eau de parfum' => ['https://www.chanel.com/us/fragrance/p/120450/n5-eau-de-parfum-spray/', 'N5 Eau de Parfum Spray'],
+];
+foreach ($codes as $case => [$url, $name]) {
+    check('name: ' . $case, name_from_url($url), $name);
+}
+check('code: what counts', array_map('is_product_code', ['H221035Z', 'M40995', 'M0565OCEY', '0400012345678', '90', '1994', '13cm', '40oz', '1000XM5', 'RTX4090', 'iphone15pro']), [true, true, true, true, false, false, false, false, false, false, false]);
 check('brand: marketplaces aren’t brands', [is_single_brand_store('https://www.amazon.com/dp/B0D1XD1ZV3'), is_single_brand_store('https://www.target.com/p/x/-/A-1'), is_single_brand_store('https://amzn.to/3x'), is_single_brand_store('https://www.gucci.com/us/en/pr/x')], [false, false, false, true]);
 check('currency: amazon marketplaces', array_map('guess_store_currency', ['https://www.amazon.co.uk/dp/X', 'https://www.amazon.de/dp/X', 'https://www.amazon.ca/dp/X', 'https://www.amazon.co.jp/dp/X', 'https://www.amazon.com/dp/X']), ['GBP', 'EUR', 'CAD', 'JPY', 'USD']);
 
@@ -226,6 +264,13 @@ check('import mine: shopmy', $pick($mine[2]), ['loafers', 'https://go.shopmy.us/
 check('import mine: bare amazon link named', $pick($mine[3]), ['Amazon find', 'https://www.amazon.co.uk/dp/B08N5WRWNW', '']);
 check('import mine: amazon short link', $pick($mine[4]), ['Amazon find', 'https://amzn.to/3XyZabc', 'https://amzn.to/3XyZabc']);
 check('import mine: a plain short link isn’t her link', $pick($mine[5])[2], '');
+$more = parse_wishlist_text("https://a.co/d/7xYzAbC\nhttps://www.amazon.com/Other-Great-Thing/dp/B08N5WRWNX?tag=me-20\n"
+    . "https://track.example-network.com/click?pid=1&dest=https%3A%2F%2Fwww.nordstrom.com%2Fs%2Fkhaite-the-lotus-mini-bag%2F7654321\n"
+    . "https://www.pinterest.com/offsite/?token=1-a&url=https%3A%2F%2Fwww.nordstrom.com%2Fs%2Fzella-live-in-high-waist-leggings%2F5460106&pin=5");
+check('import mine: the amazon app’s share link isn’t her link', $pick($more[0]), ['Amazon find', 'https://a.co/d/7xYzAbC', '']);
+check('import mine: a tagged amazon link keeps the words in it', $pick($more[1]), ['Other Great Thing', 'https://www.amazon.com/dp/B08N5WRWNX', 'https://www.amazon.com/Other-Great-Thing/dp/B08N5WRWNX?tag=me-20']);
+check('import mine: through a site it doesn’t know, only the shop link', $pick($more[2]), ['The Lotus Mini Bag', 'https://www.nordstrom.com/s/khaite-the-lotus-mini-bag/7654321', '']);
+check('import mine: a pinterest redirect is the shop link', $pick($more[3])[1], 'https://www.nordstrom.com/s/zella-live-in-high-waist-leggings/5460106');
 
 /* ───── data model ───── */
 $data = load_data();
@@ -441,6 +486,14 @@ check('out: an affiliate shop link isn’t wrapped again', $out(['url' => $awinL
 check('out: a creator shop link isn’t wrapped again', $out(['url' => 'https://go.shopmy.us/p-12345'])['url'], 'https://go.shopmy.us/p-12345');
 check('out: someone’s amazon tag, none of hers', $out(['url' => 'https://www.amazon.it/dp/B08N5WRWNW?tag=me-21']), ['url' => 'https://www.amazon.it/dp/B08N5WRWNW?tag=me-21', 'kind' => 'mine', 'label' => 'Affiliate link (Amazon Associates)', 'affiliate' => true, 'amazon' => true]);
 check('out: a plain short link can still go through the network', $out(['url' => 'https://bit.ly/abc'])['kind'], 'network');
+check('out: the amazon app’s share link as the shop link is plain', $out(['url' => 'https://a.co/d/7xYzAbC']), ['url' => 'https://a.co/d/7xYzAbC', 'kind' => 'plain', 'label' => 'Plain link', 'affiliate' => false, 'amazon' => false]);
+check('out: a plain amazon product in Your link gets her tag', $out(['url' => 'https://www.farfetch.com/x', 'affiliateUrl' => 'https://www.amazon.com/Thing/dp/B08N5WRWNW?th=1']), ['url' => 'https://www.amazon.com/dp/B08N5WRWNW?tag=fin-20', 'kind' => 'amazon', 'label' => 'Amazon Associates · fin-20', 'affiliate' => true, 'amazon' => true]);
+check('out: the shop link again in Your link goes through the network', $out(['url' => 'https://www.ssense.com/x?a=1', 'affiliateUrl' => 'https://ssense.com/x?a=1&utm_source=me'])['kind'], 'network');
+check('out: another plain link in Your link stays hers', $out(['url' => 'https://www.ssense.com/x', 'affiliateUrl' => 'https://brand.example/p/x?ref=fin'])['kind'], 'mine');
+check('out: an amazon storefront in Your link stays hers', $out(['url' => 'https://www.ssense.com/x', 'affiliateUrl' => 'https://www.amazon.com/shop/fin'])['kind'], 'mine');
+check('out: someone’s skimlinks link as the shop link gives way to hers', $out(['url' => 'https://go.skimresources.com/?id=999X111&url=https%3A%2F%2Fwww.ssense.com%2Fx']),
+    ['url' => 'https://go.skimresources.com/?id=123456X1234567&xs=1&url=https%3A%2F%2Fwww.ssense.com%2Fx&xcust=i_test', 'kind' => 'network', 'label' => 'Skimlinks', 'affiliate' => true, 'amazon' => false]);
+check('out: an awin short link isn’t wrapped', $out(['url' => 'https://tidd.ly/3AbCdEf']), ['url' => 'https://tidd.ly/3AbCdEf', 'kind' => 'mine', 'label' => 'Affiliate link (Awin)', 'affiliate' => true, 'amazon' => false]);
 
 /* ───── recognizing affiliate links ───── */
 $detect = function (string $url): ?array {
@@ -450,8 +503,11 @@ $detect = function (string $url): ?array {
 check('detect: shop link', $detect('https://www.farfetch.com/shopping/x.aspx'), null);
 check('detect: amazon without a tag', $detect('https://www.amazon.com/dp/B08N5WRWNW'), null);
 check('detect: amazon associates', $detect('https://www.amazon.co.uk/Thing/dp/B08N5WRWNW/ref=sr_1?tag=me-21&linkCode=ll1'), ['Amazon Associates', 'amazon', 'https://www.amazon.co.uk/dp/B08N5WRWNW', '', 'me-21', 'co.uk']);
-foreach (['amzn.to/3xYz', 'amzn.eu/d/abc', 'amzn.asia/d/abc', 'a.co/d/abc'] as $short) {
+foreach (['amzn.to/3xYz', 'a.co/abc'] as $short) {
     check('detect: ' . $short, $detect('https://' . $short), ['Amazon (short link)', 'short', '', '', '', '']);
+}
+foreach (['amzn.eu/d/abc', 'amzn.asia/d/abc', 'a.co/d/abc'] as $share) {
+    check('detect: the amazon app’s share link ' . $share . ' is a plain link', $detect('https://' . $share), null);
 }
 check('detect: skimlinks', $detect('https://go.skimresources.com/?id=123X456&xs=1&url=https%3A%2F%2Fwww.net-a-porter.com%2Fp%2F1'), ['Skimlinks', 'wrapper', 'https://www.net-a-porter.com/p/1', 'url', '123X456', '']);
 check('detect: sovrn', $detect('https://redirect.viglink.com/?key=' . str_repeat('ab', 16) . '&u=https%3A%2F%2Fshop.com%2Fa'), ['Sovrn', 'wrapper', 'https://shop.com/a', 'u', str_repeat('ab', 16), '']);
@@ -462,6 +518,8 @@ check('detect: rakuten', $detect('https://click.linksynergy.com/deeplink?id=AbC&
 foreach (['anrdoezrs.net', 'jdoqocy.com', 'tkqlhce.com', 'dpbolvw.net', 'kqzyfj.com', 'qksrv.net', 'emjcd.com', 'ftjcfx.com', 'lduhtrp.net', 'tqlkg.com', 'awltovhc.com', 'yceml.net'] as $cj) {
     check('detect: cj ' . $cj, $detect('https://www.' . $cj . '/click-1234567-7654321?url=https%3A%2F%2Fwww.saksfifthavenue.com%2Fp'), ['CJ', 'wrapper', 'https://www.saksfifthavenue.com/p', 'url', '1234567', '']);
 }
+check('detect: cj deep link in its path', $detect('https://www.anrdoezrs.net/links/1234567/type/dlg/https://www.neimanmarcus.com/p/x?y=1'), ['CJ', 'wrapper', 'https://www.neimanmarcus.com/p/x?y=1', '', '1234567', '']);
+check('detect: cj deep link with a sid, encoded', $detect('https://www.jdoqocy.com/links/1234567/type/dlg/sid/abc/https%3A%2F%2Fwww.neimanmarcus.com%2Fp%2Fx')[2] ?? null, 'https://www.neimanmarcus.com/p/x');
 foreach (['sjv.io', 'pxf.io', 'evyy.net', 'ojrq.net', '7eer.net'] as $impact) {
     check('detect: impact ' . $impact, $detect('https://ssense.' . $impact . '/c/111/222/333?u=https%3A%2F%2Fwww.ssense.com%2Fx'), ['Impact', 'wrapper', 'https://www.ssense.com/x', 'u', '111', '']);
 }
@@ -476,7 +534,8 @@ check('detect: flexoffers', $detect('https://track.flexlinkspro.com/g.ashx?foid=
 check('detect: ebay partner network', $detect('https://www.ebay.com/itm/Vintage-Gucci-Bag/123456789012?mkcid=1&mkrid=711-53200-19255-0&siteid=0&campid=5338123456&customid=wish&toolid=10001&mkevt=1'), ['eBay Partner Network', 'wrapper', 'https://www.ebay.com/itm/Vintage-Gucci-Bag/123456789012', '', '5338123456', '']);
 check('detect: plain ebay', $detect('https://www.ebay.com/itm/123456789012?hash=x'), null);
 $creators = ['shopmy.us/x' => 'ShopMy', 'go.shopmy.us/p-12345' => 'ShopMy', 'shop-links.co/123' => 'ShopMy', 'liketk.it/4abc' => 'LTK',
-    'shopltk.com/explore/x' => 'LTK', 'rstyle.me/+abc' => 'LTK', 'howl.me/abc' => 'Howl', 'howl.link/abc' => 'Howl', 'geni.us/abc' => 'Geniuslink'];
+    'shopltk.com/explore/x' => 'LTK', 'rstyle.me/+abc' => 'LTK', 'howl.me/abc' => 'Howl', 'howl.link/abc' => 'Howl', 'geni.us/abc' => 'Geniuslink',
+    'tidd.ly/3AbCdEf' => 'Awin', 'shopstyle.it/l/abcd' => 'ShopStyle'];
 foreach ($creators as $link => $network) {
     check('detect: ' . $link, $detect('https://' . $link), [$network, 'creator', '', '', '', '']);
 }
@@ -502,7 +561,11 @@ check('learn: cj round trip', $roundTrip('https://www.anrdoezrs.net/click-1-2?ur
 check('learn: impact round trip', $roundTrip('https://ssense.sjv.io/c/111/222/333?u=https%3A%2F%2Fwww.ssense.com%2Fx&subId1=wish', 'https://www.ssense.com/y'), 'https://www.ssense.com/y');
 check('learn: partnerize round trip', $roundTrip('https://prf.hn/click/camref:1100l3Bx/destination:https%3A%2F%2Fwww.mytheresa.com%2Fx', 'https://www.mytheresa.com/y?z=1'), 'https://www.mytheresa.com/y?z=1');
 check('learn: shareasale round trip', $roundTrip('https://shareasale.com/r.cfm?b=1&u=2468&m=3&urllink=www.shop.com%2Fp%2F1', 'https://www.shop.com/q'), 'https://www.shop.com/q');
-check('learn: http upgraded', learn_affiliate_link('http://www.anrdoezrs.net/click-1-2?url=https%3A%2F%2Fwww.saks.com%2Fp')['rule']['value'] ?? null, 'https://www.anrdoezrs.net/click-1-2?url={url}');
+check('learn: cj deep link in its path', learn_affiliate_link('https://www.anrdoezrs.net/links/1234567/type/dlg/sid/wish/https://www.neimanmarcus.com/p/x')['rule'] ?? null,
+    ['label' => 'CJ · neimanmarcus.com', 'domains' => ['neimanmarcus.com'], 'mode' => 'wrap', 'value' => 'https://www.anrdoezrs.net/links/1234567/type/dlg/sid/wish/{url}']);
+check('learn: cj path round trip', $roundTrip('https://www.anrdoezrs.net/links/1234567/type/dlg/https://www.neimanmarcus.com/p/x', 'https://www.neimanmarcus.com/p/y?z=1&w=2'), 'https://www.neimanmarcus.com/p/y?z=1&w=2');
+check('apply: cj’s path takes the shop link as it is', apply_rule(['mode' => 'wrap', 'value' => 'https://www.anrdoezrs.net/links/1234567/type/dlg/{url}'], 'https://www.neimanmarcus.com/p/y?z=1'), 'https://www.anrdoezrs.net/links/1234567/type/dlg/https://www.neimanmarcus.com/p/y?z=1');
+check('learn: http upgraded',learn_affiliate_link('http://www.anrdoezrs.net/click-1-2?url=https%3A%2F%2Fwww.saks.com%2Fp')['rule']['value'] ?? null, 'https://www.anrdoezrs.net/click-1-2?url={url}');
 $ebay = learn_affiliate_link('https://www.ebay.com/itm/123456789012?mkcid=1&mkrid=711-53200-19255-0&siteid=0&campid=5338123456&customid=wish&toolid=10001&mkevt=1');
 check('learn: ebay parameters', $ebay['rule'] ?? null, ['label' => 'eBay Partner Network · ebay.com', 'domains' => ['ebay.com'], 'mode' => 'params', 'value' => 'mkcid=1&mkrid=711-53200-19255-0&siteid=0&campid=5338123456&toolid=10001&mkevt=1']);
 check('learn: ebay round trip', detect_affiliate_link(apply_rule($ebay['rule'], 'https://www.ebay.com/itm/999?var=5'))['destination'] ?? null, 'https://www.ebay.com/itm/999?var=5');
@@ -519,8 +582,20 @@ $taught = normalize_affiliate(apply_learned_link($a, learn_affiliate_link('https
 check('learn: a shop’s new rule replaces its old one', array_column($taught['rules'], 'label'), ['amazon.de', 'amiri.com', 'CJ · farfetch.com']);
 check('learn: amazon tag added', normalize_affiliate(apply_learned_link($a, ['amazon' => ['fr' => 'fin-21']]))['amazon'], ['com' => 'fin-20', 'co.uk' => 'fin-21', 'de' => 'fin-21', 'fr' => 'fin-21']);
 check('redundant: her own amazon tag', affiliate_link_redundant(detect_affiliate_link('https://www.amazon.com/dp/B08N5WRWNW?tag=fin-20'), $a), true);
-check('redundant: someone else’s tag', affiliate_link_redundant(detect_affiliate_link('https://www.amazon.com/dp/B08N5WRWNW?tag=other-20'), $a), false);
+check('redundant: someone else’s tag, where she has her own', [affiliate_link_redundant(detect_affiliate_link('https://www.amazon.com/dp/B08N5WRWNW?tag=other-20'), $a), own_affiliate_id(detect_affiliate_link('https://www.amazon.com/dp/B08N5WRWNW?tag=other-20'), $a)], [true, 'fin-20']);
+check('redundant: a tag for a store she has none for', affiliate_link_redundant(detect_affiliate_link('https://www.amazon.fr/dp/B08N5WRWNW?tag=other-21'), $a), false);
 check('redundant: her own skimlinks id', affiliate_link_redundant(detect_affiliate_link('https://go.skimresources.com/?id=123456X1234567&url=https%3A%2F%2Fa.com%2F'), $a), true);
+check('redundant: someone else’s skimlinks or sovrn link, while she has a catch-all', [
+    affiliate_link_redundant(detect_affiliate_link('https://go.skimresources.com/?id=999X111&url=https%3A%2F%2Fa.com%2F'), $a),
+    affiliate_link_redundant(detect_affiliate_link('https://redirect.viglink.com/?key=' . str_repeat('cd', 16) . '&u=https%3A%2F%2Fa.com%2F'), $a),
+], [true, true]);
+check('redundant: no catch-all of hers', affiliate_link_redundant(detect_affiliate_link('https://go.skimresources.com/?id=999X111&url=https%3A%2F%2Fa.com%2F'), ['network' => 'none', 'networkId' => ''] + $a), false);
+check('redundant: other networks are never covered', affiliate_link_redundant(detect_affiliate_link('https://www.awin1.com/cread.php?awinmid=1&awinaffid=2&ued=https%3A%2F%2Fa.com%2F'), $a), false);
+$amznTo = detect_affiliate_link('https://amzn.to/3abc');
+check('short link: followed to a tag', amazon_short_link_found('https://amzn.to/3abc', $amznTo, 'https://www.amazon.com/dp/B08N5WRWNW?tag=other-20&linkCode=sl1')['id'] ?? null, 'other-20');
+check('short link: followed to no tag', [amazon_short_link_found('https://a.co/d/7xYzAbC', null, 'https://www.amazon.com/dp/B08N5WRWNW?ref_=cm_sw_r_cp'), amazon_short_link_found('https://amzn.to/3abc', $amznTo, 'https://www.amazon.com/dp/B08N5WRWNW')], [null, null]);
+check('short link: not followed', amazon_short_link_found('https://amzn.to/3abc', $amznTo, ''), $amznTo);
+check('short link: other links as they were', amazon_short_link_found('https://go.shopmy.us/p-1', ['network' => 'ShopMy'], 'https://www.amazon.com/dp/B08N5WRWNW?tag=x-20'), ['network' => 'ShopMy']);
 
 /* ───── the public page's links ───── */
 $site = load_data();
@@ -546,6 +621,10 @@ check('public: archived items don’t count', public_state($site)['settings']['a
 $site['items'][$hat]['status'] = 'wishing';
 $site['settings']['copy']['affiliateNote'] = 'As an Amazon Associate I earn from qualifying purchases, and so do my other shops.';
 check('public: amazon sentence never doubled', public_state($site)['settings']['affiliateNote'], $site['settings']['copy']['affiliateNote']);
+$site['settings']['copy']['affiliateNote'] = 'Some links pay me. I’m an Amazon Associate, so Amazon tips the vault.';
+check('public: her own words about amazon don’t replace its sentence', public_state($site)['settings']['affiliateNote'], $site['settings']['copy']['affiliateNote'] . ' ' . AMAZON_SENTENCE);
+$site['settings']['copy']['affiliateNote'] = "Links pay me.\nAs an Amazon Associate  I earn from qualifying purchases";
+check('public: amazon sentence found across spaces, without its full stop', public_state($site)['settings']['affiliateNote'], $site['settings']['copy']['affiliateNote']);
 $site['settings']['affiliate']['enabled'] = false;
 $site['items'][$hat]['affiliateUrl'] = '';
 check('public: all off, no disclosure', public_state($site)['settings']['affiliateNote'], '');
@@ -570,25 +649,42 @@ foreach ($bots as $agent) {
     $counted += count_click('i_amiri_skirt', $tzName, $noon + 86400) ? 1 : 0;
 }
 check('click: bots and link previews never count', $counted, 0);
+check('click: crawlers named after apps are bots', array_map('is_bot_agent', ['Pinterest/0.2 (+http://www.pinterest.com/bot.html)', 'Mozilla/5.0 (compatible; Pinterestbot/1.0; +http://www.pinterest.com/bot.html)']), [true, true]);
+check('click: the apps’ own browsers are visitors', array_map('is_bot_agent', [
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 [Pinterest/iOS]',
+    'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36 [Pinterest/Android]',
+    'Mozilla/5.0 (Linux; Android 13; Pixel 7; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/126.0.0.0 Mobile Safari/537.36 Telegram-Android/10.11.1 (Google Pixel 7; Android 13; SDK 33; HIGH)',
+]), [false, false, false]);
 $_SERVER['HTTP_USER_AGENT'] = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 Safari/605.1.15';
 check('click: bad id', count_click('../data', $tzName, $noon), false);
 check('click: nothing written when nothing counted', file_get_contents(clicks_file()), $before);
 $_SERVER['REMOTE_ADDR'] = '203.0.113.22';
 $counted = 0;
-for ($i = 0; $i < 70; $i++) {
+for ($i = 0; $i < 25; $i++) {
     $counted += count_click('i_rate_' . $i, $tzName, $noon + 2 * 86400 + $i) ? 1 : 0;
 }
-check('click: at most 60 per visitor per 10 minutes', $counted, 60);
-check('click: the window moves on', count_click('i_rate_70', $tzName, $noon + 2 * 86400 + CLICK_WINDOW + 30), true);
+check('click: 20 items per visitor and day at most', $counted, CLICK_MAX_ITEMS_PER_VISITOR);
+$_SERVER['REMOTE_ADDR'] = '203.0.113.23';
+check('click: that doesn’t stop anyone else', count_click('i_rate_24', $tzName, $noon + 2 * 86400 + 60), true);
+$_SERVER['REMOTE_ADDR'] = '203.0.113.22';
+check('click: the next day counts again', count_click('i_rate_24', $tzName, $noon + 3 * 86400), true);
 $clicks = load_clicks();
 $dayKey = function (int $days) use ($noon, $tzName): string {
     return local_day($noon + $days * 86400, new DateTimeZone($tzName));
 };
-check('click: only today and yesterday remembered', array_keys($clicks['seen']), [$dayKey(1), $dayKey(2)]);
+check('click: only today and yesterday remembered', array_keys($clicks['seen']), [$dayKey(2), $dayKey(3)]);
 check('click: summary', array_intersect_key(click_summary($clicks, 'i_amiri_hat', $tzName), ['total' => 1, 'week' => 1]), ['total' => 3, 'week' => 3]);
 check('click: summary of an unclicked item', click_summary($clicks, 'i_nope', $tzName), ['total' => 0, 'week' => 0, 'last' => null]);
 check('click: no address stored', strpos((string)file_get_contents(clicks_file()), '203.0.113') === false, true);
 check('click: counts kept 90 days', [count_click('i_amiri_hat', $tzName, $noon + 100 * 86400), array_keys(load_clicks()['items']['i_amiri_hat']['days']), load_clicks()['items']['i_amiri_hat']['total']], [true, [$dayKey(100)], 4]);
+$full = load_clicks();
+$full['seen'][$dayKey(100)] = array_fill_keys(array_map(function (int $i): string {
+    return substr(md5((string)$i), 0, 20);
+}, range(1, CLICK_MAX_SEEN_PER_DAY)), 1);
+write_json(clicks_file(), $full);
+$_SERVER['REMOTE_ADDR'] = '203.0.113.30';
+check('click: the day’s cap stops the counting, and says so', [count_click('i_amiri_polo', $tzName, $noon + 100 * 86400 + 60), load_clicks()['capped']], [false, $dayKey(100)]);
+check('click: the cap noted for today only', [clicks_capped_today(['capped' => local_day(time(), new DateTimeZone($tzName))], $tzName), clicks_capped_today(['capped' => $dayKey(100)], $tzName), clicks_capped_today(['capped' => ''], $tzName)], [true, false, false]);
 unset($_SERVER['REMOTE_ADDR'], $_SERVER['HTTP_USER_AGENT']);
 
 /* ───── clean up ───── */

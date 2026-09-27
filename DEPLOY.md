@@ -93,7 +93,10 @@ below is in the Control Room under **Settings → Affiliate links** (the sign-up
    [affiliate-program.amazon.com](https://affiliate-program.amazon.com/) with the site's address. Your tracking ID,
    like `yourname-20`, is at the top right of Associates Central (and under **Manage Tracking IDs**). Paste it into
    **Tag for amazon.com (US)**. Each other Amazon country (amazon.co.uk, amazon.de…) is a separate sign-up with its
-   own tag: those go under **Other Amazon stores**.
+   own tag: those go under **Other Amazon stores**. Once your tag is saved, any Amazon product link you paste is
+   enough: your tag goes on it by itself. A SiteStripe short link (`amzn.to/…`) you made is recognized as yours;
+   the Amazon app's **Share** links (`a.co/d/…`) carry no tag, so they're treated as plain Amazon links. Read
+   **Amazon's photos and prices** under *Good to know* first.
 2. **Skimlinks or Sovrn Commerce**, for everything else. Pick one, not both. One ID turns links to Gucci, Farfetch,
    Net-a-Porter, SSENSE, Mytheresa, Nordstrom, Sephora and tens of thousands of other shops into affiliate links on
    its own; a shop without a program still just works. Sign up at [skimlinks.com](https://skimlinks.com/) or
@@ -116,7 +119,8 @@ below is in the Control Room under **Settings → Affiliate links** (the sign-up
    clicks so far.
 
 Shops that should always get a plain link go under **Never use affiliate links for**, one per line. **Use
-affiliate links on the site** switches everything off at once (an item's own link is still used).
+affiliate links on the site** switches everything off at once (your own links are still used: an item's **Your
+link**, or an affiliate link pasted as its shop link).
 
 **The disclosure is automatic.** While any button uses an affiliate link, a short note appears at the bottom of
 the site and a small **Affiliate link** caption sits under that button. Change the wording under **Disclosure**.
@@ -131,15 +135,23 @@ Good to know:
   (you can apply again later).
 - **Amazon needs a public site.** Keep **Settings → Visibility** on **Public** or **Hide amounts**. Behind a
   passcode (**Private**), Amazon can't see it.
+- **Amazon's photos and prices.** Next to your Amazon links, Amazon only allows product photos and prices that come
+  from its own tools, not ones copied off its pages. The Control Room saves a copy of the shop's photo (when you add
+  an item, with **Fetch missing photos** or with the **+ Findom** button) and shows the price from the day you added
+  it. So for each Amazon item whose button carries your tag, open it and **Replace** the photo with one of your own
+  (or **Remove** it), and keep **Settings → Visibility** on **Hide amounts** so no prices show (that hides every
+  amount on the site). If that's too much, skip the tag for Amazon: leave the Amazon tags empty and don't paste
+  Amazon links you made into **Your link**. Amazon's rules change from time to time, so read **Program Policies**
+  in Associates Central before you apply.
 - **Your own purchases usually don't count.** Most programs don't pay commission on things you buy yourself, and
   Amazon forbids buying through your own links. Commissions come from visitors buying.
-- **Clicks aren't sales.** The Control Room counts button clicks (once per visitor per item per day, bots
-  ignored). What you actually earned is in each program's own dashboard.
+- **Clicks aren't sales.** The Control Room counts button clicks (once per visitor per item per day, for up to 20
+  items a day per visitor, bots ignored). What you actually earned is in each program's own dashboard.
 - **Some shops block automatic lookups** (Farfetch and Amazon often do), so the name, price or photo can come in
   empty. Type the price in the item, or use the **+ Findom** button on a computer (in **Settings → Affiliate
   links** and behind the **+**): drag it to your bookmarks bar, then click it on the product page. The Control Room
   opens with the item filled in, and nothing is saved until you press **Add to the list**. If you were signed out,
-  sign in and click it again.
+  sign in on the page that opens: the item comes up right after.
 
 ## What's stored where
 

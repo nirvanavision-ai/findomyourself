@@ -2,7 +2,7 @@
 /*
  * FINDOM YOURSELF: counts clicks on items' shop buttons. POST {id} with the header
  * X-Findom: 1 (a plain cross-site form can't send it). A visitor counts once per item per
- * day and at most 60 times per 10 minutes, bots never count, and visitors are told apart by
+ * day, for 20 items a day at most, bots never count, and visitors are told apart by
  * a salted hash, never a stored IP. This only counts: it never redirects anywhere.
  */
 declare(strict_types=1);

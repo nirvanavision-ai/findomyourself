@@ -67,6 +67,10 @@ html = await page('/admin/');
 assert(html.includes('id="app"'), 'app shell after setup');
 csrf = html.match(/name="csrf-token" content="([^"]+)"/)[1];
 assert(!fs.existsSync(PRIV + '/setup-code.txt'), 'setup code used up');
+// Opened from a shop's page (the bookmarklet), the Strict sign-in cookie isn't sent: the form reloads itself once.
+const crossSite = await (await req('/admin/', { headers: { 'Sec-Fetch-Site': 'cross-site' } }, { cookie: '' })).text();
+const typedIn = await (await req('/admin/', { headers: { 'Sec-Fetch-Site': 'none' } }, { cookie: '' })).text();
+assert(crossSite.includes('admin/js/recheck.js') && crossSite.includes('id="password"') && !typedIn.includes('recheck.js'), 'sign-in form reloads itself once only when opened from another site');
 let s = await api('state', null, 'GET');
 assert(s.ok && s.state.items.length === 12, 'state has 12 seeded items');
 assert(s.meta && s.meta.curl === true, 'meta reports curl');
@@ -146,6 +150,8 @@ for (const [bad, what] of [[{ network: 'skimlinks', networkId: 'nope' }, 'a bad 
   s = await api('settings.save', { settings: { affiliate: bad } });
   assert(!s.ok && s.status === 400, 'affiliate settings refuse ' + what + ': ' + s.error);
 }
+s = await api('settings.save', { settings: { affiliate: { amazon: { 'co.uk': 'Fin Store' } } } });
+assert(!s.ok && s.status === 400 && s.error.includes('amazon.co.uk') && /yourname-21/.test(s.error) && !/It looks like/.test(s.error), 'a bad UK tag says what a tracking ID looks like: ' + s.error);
 s = await api('settings.save', { settings: { affiliate: { network: 'skimlinks', networkId: '123456x1234567', amazon: { com: 'fin-20' }, exclude: ['https://www.amiri.com/'] }, copy: { affiliateNote: 'Some links pay me.' } } });
 let aff = s.state?.settings.affiliate;
 assert(s.ok && aff.network === 'skimlinks' && aff.networkId === '123456X1234567' && aff.amazon.com === 'fin-20' && aff.exclude.join() === 'amiri.com' && s.state.settings.copy.affiliateNote === 'Some links pay me.', 'affiliate settings save');
@@ -198,6 +204,44 @@ s = await api('items.import', { items: [
 ] });
 const tagged = s.state?.items.find(i => i.name === 'Tagged thing');
 assert(s.ok && s.added === 2 && tagged.url === 'https://www.amazon.com/dp/B0TESTTES3' && tagged.affiliateUrl === '' && s.state.items[1].affiliateUrl.startsWith('https://www.awin1.com/'), 'import: short product links, her own links kept unless they only repeat her Amazon tag');
+s = await api('items.import', { items: [{ name: 'Blogger pick', url: 'https://www.amazon.com/dp/B0TESTTES6', affiliateUrl: 'https://www.amazon.com/dp/B0TESTTES6?tag=someblogger-20' }] });
+const blogger = s.state?.items.find(i => i.name === 'Blogger pick');
+assert(s.ok && blogger.affiliateUrl === '' && blogger.out.url === 'https://www.amazon.com/dp/B0TESTTES6?tag=fin-20', 'import: someone else’s Amazon tag gives way to hers');
+
+// links that aren't hers: someone's tag or catch-all ID, the Amazon app's share links, redirects
+s = await api('item.fromLink', { url: 'https://www.amazon.com/Other-Great-Thing/dp/B0TESTTES4?tag=someblogger-20&linkCode=ll1' });
+const foreign = s.state?.items.find(i => i.id === s.itemId);
+assert(s.ok && foreign.affiliateUrl === '' && foreign.url === 'https://www.amazon.com/dp/B0TESTTES4' && foreign.out.url === 'https://www.amazon.com/dp/B0TESTTES4?tag=fin-20'
+  && s.affiliate === null && s.warnings.some(w => w.includes('someblogger-20') && w.includes('fin-20')), 'amazon link with someone else’s tag → her own tag instead, and she’s told: ' + s.warnings?.[0]);
+assert(foreign.name === 'Other Great Thing', 'a tagged Amazon link is named from its words when Amazon can’t be asked (' + foreign.name + ')');
+s = await api('item.fromLink', { url: 'https://a.co/d/7xYzAbC' });
+const share = s.state?.items.find(i => i.id === s.itemId);
+assert(s.ok && share.affiliateUrl === '' && s.affiliate === null && share.out.kind === 'plain' && !share.out.affiliate, 'the Amazon app’s share link isn’t kept as her link (' + share?.out.label + ')');
+s = await api('item.fromLink', { url: 'https://go.skimresources.com/?id=999X111&url=https%3A%2F%2Fwww.bags.example%2Fp%2Fblue-bag' });
+const skim = s.state?.items.find(i => i.id === s.itemId);
+assert(s.ok && skim.affiliateUrl === '' && skim.url === 'https://www.bags.example/p/blue-bag' && skim.out.kind === 'network' && skim.out.url.includes('id=123456X1234567')
+  && s.warnings.some(w => w.includes('999X111')), 'someone else’s Skimlinks link → her own Skimlinks');
+s = await api('item.fromLink', { url: 'https://www.pinterest.com/offsite/?token=123-abc&url=https%3A%2F%2Fwww.bags.example%2Fp%2Fgreen-bag&pin=5' });
+const pin = s.state?.items.find(i => i.id === s.itemId);
+assert(s.ok && pin.url === 'https://www.bags.example/p/green-bag' && pin.affiliateUrl === '' && s.affiliate === null && s.suggestion === null && pin.out.kind === 'network', 'a Pinterest redirect → the shop link inside it');
+s = await api('item.fromLink', { url: 'https://track.example-network.com/click?pid=1&dest=https%3A%2F%2Fwww.bags.example%2Fp%2Fred-bag' });
+const tracked = s.state?.items.find(i => i.id === s.itemId);
+assert(s.ok && tracked.url === 'https://www.bags.example/p/red-bag' && tracked.affiliateUrl === '' && s.suggestion === null && s.warnings.some(w => w.includes('track.example-network.com')),
+  'a link through a site it doesn’t know → only the shop link, no rule offered, and she’s told');
+s = await api('item.fromLink', { url: 'https://www.awin1.com/cread.php?awinmid=1&awinaffid=777&ued=https%3A%2F%2Fwww.bags.example%2Fp%2Fpink-bag' });
+assert(s.ok && s.affiliate?.network === 'Awin' && s.affiliate.id === '777', 'a link kept as hers says which ID is in it');
+s = await api('affiliate.detect', { url: 'https://www.amazon.com/dp/B0TESTTES5', shopUrl: 'https://www.bags.example/p/green-bag' });
+assert(s.ok && s.detected === null && s.out?.kind === 'amazon' && s.out.url === 'https://www.amazon.com/dp/B0TESTTES5?tag=fin-20', 'affiliate.detect: a plain Amazon link as Your link still gets her tag');
+
+// shop links saved from the editor or grabbed from a page: shortened like pasted ones
+s = await api('item.save', { item: { name: 'Grabbed pods', price: 249, currency: 'GBP', url: 'https://www.amazon.co.uk/Apple-AirPods-Pro/dp/B0D1XD1ZV3/ref=sr_1_1?crid=2X&keywords=airpods+pro+for+my+ex&qid=1&sprefix=airpods%2Caps%2C150&sr=8-1&tag=someblogger-21' } });
+const grabbed = s.state?.items.find(i => i.id === s.itemId);
+assert(s.ok && grabbed.url === 'https://www.amazon.co.uk/dp/B0D1XD1ZV3' && grabbed.out.kind === 'plain', 'item.save: a grabbed Amazon page keeps neither her search words nor anyone’s tag');
+s = await api('item.save', { item: { id: grabbed.id, url: 'https://www.ssense.com/en-us/women/product/x/123?color=red&_kx=abc.1&utm_source=news' } });
+assert(s.ok && s.state.items.find(i => i.id === grabbed.id).url === 'https://www.ssense.com/en-us/women/product/x/123?color=red', 'item.save: a changed shop link loses newsletter and tracking IDs');
+s = await api('item.save', { item: { id: grabbed.id, url: awin } });
+assert(s.ok && s.state.items.find(i => i.id === grabbed.id).url === awin, 'item.save: an affiliate link typed as the shop link stays whole');
+s = await api('item.delete', { id: grabbed.id });
 
 const pubAff = (await (await fetch(BASE + '/api/state.php')).json()).state;
 const shown = Object.fromEntries(pubAff.items.map(i => [i.id, i]));
@@ -238,6 +282,9 @@ s = await api('state', null, 'GET');
 hat = s.state.items.find(i => i.id === 'i_amiri_hat');
 assert(hat.clicks.total === 1 && hat.clicks.week === 1 && hat.clicks.last && s.state.clicksTotal === 1, 'the Control Room sees the click');
 assert(!fs.readFileSync(PRIV + '/clicks.json', 'utf8').includes('127.0.0.1'), 'no address stored with clicks');
+assert(s.state.clicksCapped === false, 'the Control Room is told whether today’s clicks stopped being counted');
+c = await click('i_versace_ashtray', { agent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 [Pinterest/iOS]' });
+assert(c.ok && c.counted === true, 'a visitor browsing in Pinterest’s app counts');
 
 s = await api('settings.save', { settings: { hourlyRate: 40, copy: { heroKicker: 'Test kicker' }, voice: { praise: ['Good.'] } } });
 assert(s.ok && s.state.settings.hourlyRate === 40 && s.state.settings.copy.heroKicker === 'Test kicker' && s.state.settings.voice.praise.length === 1, 'settings save');

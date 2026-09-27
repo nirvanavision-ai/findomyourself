@@ -1,8 +1,10 @@
 /*
  * FINDOM YOURSELF · Control Room: adding many items at once. "Paste a whole list" (read it,
- * check it, add it) and fetching photos for items that have none, a few per request.
+ * check it, add it) and fetching photos for items that have none, a few per request: by hand
+ * (List → "Fetch photos"), and quietly in the background when the Control Room opens and after
+ * a list is added (a small status in the top bar, then one toast with the result).
  */
-import { h, icon, swap, currencyName, parseAmount, amountInput, hostOf, plural, uid } from './core.js';
+import { h, icon, swap, currencyName, parseAmount, amountInput, hostOf, plural, uid, serverNow } from './core.js';
 import { api, store } from './api.js';
 import { Sheet, textArea, textInput, confirmSheet, toast, button, busy } from './ui.js';
 import { openItemEditor } from './item.js';
@@ -190,18 +192,15 @@ export function openBulkImport(initialText = '') {
     const items = store.state.items.filter((i) => added.includes(i.id));
     const fetchable = items.filter((i) => !i.image && (i.imageSource || i.url)).length;
     sheet.setTitle(`Added ${plural(count, 'item')}`, 'Done');
-    const fetchBtn = button('Fetch their photos', { kind: 'primary', iconName: 'image', onclick: () => {
-      sheet.close();
-      fetchPhotos({ ids: added, title: 'Photos for the new items' });
-    } });
     swap(sheet.body, h('div', { class: 'done-state' },
       h('p', { class: 'done-mark', 'aria-hidden': 'true' }, icon('check')),
       h('p', { class: 'done-line', text: `${plural(count, 'new obsession')} on the list.` }),
       fetchable
-        ? h('p', { class: 'sheet-lede', text: `${plural(fetchable, 'of them has', 'of them have')} a shop link. Want me to grab the product photos? Some shops refuse; you’ll see which.` })
+        ? h('p', { class: 'sheet-lede', text: 'Their photos are downloading in the background and pop in as they arrive. Some shops refuse; you’ll see which.' })
         : h('p', { class: 'sheet-lede', text: 'None of them had links, so add photos from each item when you’re ready.' })));
-    swap(sheet.foot, button(fetchable ? 'Not now' : 'Done', { kind: fetchable ? 'ghost' : 'primary', onclick: () => sheet.close() }), fetchable ? fetchBtn : null);
+    swap(sheet.foot, button('Done', { kind: 'primary', onclick: () => sheet.close() }));
     toast(`Added ${plural(count, 'item')}.`);
+    if (fetchable) autoFetchPhotos();
   }
 
   renderPaste();
@@ -215,9 +214,26 @@ export function openBulkImport(initialText = '') {
 /** Items that could get a photo from their link (the server skips archived ones). */
 export const missingPhotos = (state) => state.items.filter((i) => !i.image && i.status !== 'archived' && (i.imageSource || i.url));
 
+/** "Couldn’t get these": each failed item with its shop link and an "Add photo" button. */
+function failureList(failed, onPick) {
+  return [
+    h('h3', { class: 'card-label', text: 'Couldn’t get these' }),
+    h('ul', { class: 'failure-list' }, failed.map((f) => {
+      const item = store.state.items.find((i) => i.id === f.id);
+      return h('li', { class: 'failure' },
+        h('div', { class: 'failure-text' }, h('strong', { text: f.name }), h('span', { class: 'muted', text: f.error })),
+        h('div', { class: 'failure-actions' },
+          item && item.url && h('a', { class: 'btn btn-ghost btn-sm', href: item.url, target: '_blank', rel: 'noopener noreferrer' }, 'Shop ', icon('external')),
+          button('Add photo', { size: 'sm', kind: 'primary', iconName: 'upload', onclick: () => onPick(f.id) })));
+    })),
+    h('p', { class: 'field-hint', text: 'Tip: open the shop page, press and hold the photo, copy it (or its image address), then paste it into the item. On a computer, the + Findom bookmarklet brings the photo over from the shop page.' }),
+  ];
+}
+
 /**
  * Asks the server for photos until it has tried every item. ids limits it to those items.
- * Items that fail are passed back as "exclude" so the next round moves on.
+ * Items that fail are passed back as "exclude" so the next round moves on. A background
+ * fetch that's running finishes its current request first and hands over to this one.
  */
 export async function fetchPhotos({ ids = null, title = 'Fetching photos' } = {}) {
   let stopped = false;
@@ -257,22 +273,11 @@ export async function fetchPhotos({ ids = null, title = 'Fetching photos' } = {}
       h('span', { class: 'is-in', text: `${done.length} saved` }), ' · ',
       h('span', { class: failed.length ? 'is-out' : '', text: `${failed.length} failed` }),
       total ? h('span', { class: 'muted', text: ` · ${total} to try` }) : null);
-    swap(failures, failed.length ? [
-      h('h3', { class: 'card-label', text: 'Couldn’t get these' }),
-      h('ul', { class: 'failure-list' }, failed.map((f) => {
-        const item = store.state.items.find((i) => i.id === f.id);
-        return h('li', { class: 'failure' },
-          h('div', { class: 'failure-text' }, h('strong', { text: f.name }), h('span', { class: 'muted', text: f.error })),
-          h('div', { class: 'failure-actions' },
-            item && item.url && h('a', { class: 'btn btn-ghost btn-sm', href: item.url, target: '_blank', rel: 'noopener noreferrer' }, 'Shop ', icon('external')),
-            button('Add photo', { size: 'sm', kind: 'primary', iconName: 'upload', onclick: () => {
-              stopped = true;
-              sheet.close();
-              openItemEditor(f.id, { focus: 'photo' });
-            } })));
-      })),
-      h('p', { class: 'field-hint', text: 'Tip: open the shop page, press and hold the photo, copy it, then paste it into the item.' }),
-    ] : []);
+    swap(failures, failed.length ? failureList(failed, (id) => {
+      stopped = true;
+      sheet.close();
+      openItemEditor(id, { focus: 'photo' });
+    }) : []);
   };
 
   sheet.body.append(progress, count, statusLine, failures);
@@ -280,6 +285,8 @@ export async function fetchPhotos({ ids = null, title = 'Fetching photos' } = {}
   render();
   sheet.open();
 
+  if (auto.run) statusLine.textContent = 'Letting the background fetch finish its batch…';
+  await stopAutoPhotos('manual');
   for (let round = 0; !stopped && round < 200; round++) {
     const tried = done.length + failed.length;
     statusLine.textContent = total === null ? 'Asking the shops for photos…' : `Working… ${tried} of ${total}`;
@@ -309,4 +316,191 @@ export async function fetchPhotos({ ids = null, title = 'Fetching photos' } = {}
   doneBtn.hidden = false;
   if (sheet.closed && total) toast(`Photos: ${done.length} saved, ${failed.length} failed.`);
   return { done, failed };
+}
+
+/* ───────────────────────── in the background ───────────────────────── */
+
+const RETRY_MS = 24 * 3600 * 1000; // PHOTO_RETRY_SECONDS in api.php
+const AUTO_TRIES = 3; // PHOTO_AUTO_TRIES in api.php
+const BATCH = 3; // photos per request: the status moves often, and each request stays short
+const MAX_ROUNDS = 80; // a safety net (the list holds 200 items at most)
+
+/**
+ * Missing photos the background fetch may look for (the server has the final say): never had one,
+ * not tried too often at this link, and not in the last day.
+ */
+const duePhotos = (state, now = serverNow()) => missingPhotos(state).filter((i) => {
+  const f = i.imageFetch;
+  return !f || (!f.had && (f.tries || 0) < AUTO_TRIES && !(f.at && now - Date.parse(f.at) < RETRY_MS));
+});
+
+const auto = {
+  run: null, // the run in progress (a promise that never rejects)
+  stop: '', // set to stop after the current request: 'hidden' or 'manual'
+  again: false, // asked again mid-run (a list was just added): one more pass before finishing
+  paused: false, // stopped by the page being hidden or the connection dropping: carries on when back
+  total: 0,
+  done: [], // results so far, kept across a pause for the one toast at the end
+  failed: [],
+  error: '',
+  tried: new Set(), // every item tried since the page opened: never twice in one visit
+};
+
+const statusText = h('span', { class: 'photo-status-text', 'aria-live': 'polite' });
+const statusWords = () => `Fetching missing photos in the background: ${auto.done.length + auto.failed.length} of ${auto.total} tried. They pop in as they arrive.`;
+/** The small "fetching photos" status for the top bar (admin.js puts it there). On a phone it's just a ring: a tap says what it is. */
+export const photoStatus = h('button', { class: 'photo-status', type: 'button', hidden: true, onclick: () => toast(statusWords()) },
+  h('span', { class: 'photo-status-ring', 'aria-hidden': 'true' }, icon('image')), statusText);
+
+function showStatus() {
+  const tried = auto.done.length + auto.failed.length;
+  photoStatus.hidden = false;
+  statusText.textContent = tried ? `Photos ${tried}/${auto.total}` : `Fetching ${plural(auto.total, 'photo')}…`;
+  photoStatus.title = statusWords();
+}
+
+function resetRun() {
+  Object.assign(auto, { again: false, paused: false, total: 0, done: [], failed: [], error: '' });
+}
+
+/**
+ * Quietly fetches the photos that are due (see duePhotos), a few per request, with a small status
+ * in the top bar and one toast at the end. Called when the Control Room opens and after a list is
+ * added; asked again while running, it makes one more pass for anything new. Never runs while the
+ * page is hidden: it stops after the current request and carries on when she's back.
+ */
+export function autoFetchPhotos() {
+  if (auto.run) {
+    auto.again = true;
+    if (auto.stop === 'hidden' && !document.hidden) auto.stop = '';
+    return auto.run;
+  }
+  if (!store.state) return null;
+  if (document.hidden) {
+    auto.paused = true; // starts when she looks
+    return null;
+  }
+  auto.paused = false;
+  const due = duePhotos(store.state).filter((i) => !auto.tried.has(i.id)).length;
+  if (!due) {
+    report(); // a paused run whose last photos someone else fetched meanwhile
+    return null;
+  }
+  auto.total = auto.done.length + auto.failed.length + due;
+  auto.run = runAuto().catch((e) => console.error(e)).finally(() => { auto.run = null; });
+  return auto.run;
+}
+
+/** Carries on a background fetch that stopped when the page was hidden or went offline. */
+export function resumeAutoPhotos() {
+  if (auto.run) {
+    if (auto.stop === 'hidden') auto.stop = ''; // back before it had stopped: just keep going
+  } else if (auto.paused) {
+    autoFetchPhotos();
+  }
+}
+
+/** Stops the background fetch after its current request ('hidden': until she's back; 'manual': for good). */
+export async function stopAutoPhotos(reason = 'hidden') {
+  if (auto.run) {
+    auto.stop = reason;
+    await auto.run;
+  } else if (reason === 'manual') {
+    resetRun(); // the manual fetch supersedes a paused one, results and all
+  }
+}
+
+async function runAuto() {
+  auto.stop = '';
+  auto.again = false;
+  showStatus();
+  let gone = 0;
+  try {
+    for (let round = 0; round < MAX_ROUNDS && !auto.stop; round++) {
+      let res;
+      try {
+        res = await api('items.fetchImages', { auto: true, limit: BATCH, exclude: [...auto.tried] });
+      } catch (e) {
+        if (e.status === 404 && ++gone < 3) continue; // an item deleted mid-fetch: the next round skips it
+        if (e.code === 'network') auto.paused = true; // tries again when the connection is back
+        else auto.error = e.message;
+        break;
+      }
+      res.done.forEach((id) => auto.tried.add(id));
+      res.failed.forEach((f) => auto.tried.add(f.id));
+      auto.done.push(...res.done);
+      auto.failed.push(...res.failed);
+      auto.total = auto.done.length + auto.failed.length + res.remaining;
+      showStatus();
+      if (res.remaining > 0 && (res.done.length || res.failed.length)) continue;
+      if (!auto.again) break;
+      auto.again = false; // a list was added meanwhile: one more pass picks its items up
+    }
+  } finally {
+    photoStatus.hidden = true;
+  }
+  if (auto.stop === 'hidden') auto.paused = true;
+  if (auto.stop === 'manual') resetRun(); // the manual fetch reports for itself
+  else if (!auto.paused) report();
+  auto.stop = '';
+}
+
+/**
+ * One toast for the whole run: what arrived, and which shops refused (with a way to fix them).
+ * A photo that failed before and failed again on a later day isn't reported twice.
+ */
+function report() {
+  const { done, error } = auto;
+  // New misses only; and failures fixed or deleted since don't need mentioning.
+  const failed = auto.failed.filter((f) => !(f.tries > 1) && store.state.items.some((i) => i.id === f.id && !i.image));
+  resetRun();
+  if (!done.length && !failed.length) {
+    if (error) toast(`Couldn’t fetch the missing photos: ${error}`, { tone: 'error' });
+    return;
+  }
+  toast(photoSummary(done.length, failed), failed.length
+    ? { tone: 'warn', action: () => openPhotoFailures(failed), actionLabel: 'See which', duration: 10000, stacked: true }
+    : {});
+}
+
+/**
+ * "2 photos added. Farfetch blocked 1: paste its image link or use the + Findom bookmarklet."
+ * (The bookmarklet, clicked on the shop's page, offers that page's photo to the item already on the list.
+ * It lives in a bookmarks bar, so on a touch screen it isn't suggested.)
+ */
+function photoSummary(added, failed) {
+  const parts = added ? [`${plural(added, 'photo')} added.`] : [];
+  const n = failed.length;
+  if (!n) return parts.join(' ');
+  const stores = new Map();
+  for (const f of failed) stores.set(f.store || 'the shop', (stores.get(f.store || 'the shop') || 0) + 1);
+  const count = added ? String(n) : plural(n, 'photo');
+  const touch = window.matchMedia('(pointer: coarse)').matches;
+  const fix = `paste ${n === 1 ? 'its image link' : 'their image links'}${touch ? ' or add a photo from the item' : ' or use the + Findom bookmarklet'}`;
+  if (stores.size === 1) {
+    const [name] = stores.keys();
+    parts.push(failed.every((f) => f.blocked)
+      ? `${name} blocked ${count}: ${fix}.`
+      : `${count} from ${name} didn’t come through: ${fix}.`);
+  } else {
+    const which = [...stores].sort((a, b) => b[1] - a[1]).map(([s, c]) => `${s} ${c}`).join(', ');
+    parts.push(`${count} didn’t come through (${which}): ${fix}.`);
+  }
+  return parts.map((p) => p.charAt(0).toUpperCase() + p.slice(1)).join(' ');
+}
+
+/** The photos the background fetch couldn't get, each with a way to add it by hand. */
+function openPhotoFailures(failed) {
+  const open = failed.filter((f) => store.state.items.some((i) => i.id === f.id && !i.image));
+  if (!open.length) {
+    toast('Those items have photos now.');
+    return;
+  }
+  const sheet = new Sheet({ title: `${plural(open.length, 'photo')} to add`, eyebrow: 'Photos', size: 'md' });
+  sheet.body.append(h('div', { class: 'fetch-failures' }, failureList(open, (id) => {
+    sheet.close();
+    openItemEditor(id, { focus: 'photo' });
+  })));
+  sheet.foot.append(button('Done', { kind: 'primary', onclick: () => sheet.close() }));
+  sheet.open();
 }
