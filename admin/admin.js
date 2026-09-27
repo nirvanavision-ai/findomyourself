@@ -9,11 +9,13 @@
  * js/api.js       talking to api.php, signing back in, the shared state
  * js/today.js     vault, goal, focus timer, commands, fines, money in, receipts
  * js/ledger.js    receipts: rows, editing, the full history, logging past work
- * js/list.js      paste a link, filters, the list, reordering
- * js/item.js      the item editor, photos, claiming
+ * js/add.js       paste a link from any shop (List, Today, and the + in the top bar)
+ * js/grab.js      the "+ Findom" bookmarklet and the #add= link it opens
+ * js/list.js      filters, the list, reordering
+ * js/item.js      the item editor, her own (affiliate) link, photos, claiming
  * js/bulk.js      pasting a whole list, fetching photos in bulk
  * js/rules.js     hourly rate, commands, fines
- * js/settings.js  site words, voice, money, time zone, visibility, password, backup
+ * js/settings.js  site words, voice, money, time zone, visibility, password, affiliate links, backup
  */
 import { h, icon, balance, serverNow, sig, reducedMotion } from './js/core.js';
 import { refresh, store, subscribe, isReauthing } from './js/api.js';
@@ -24,6 +26,8 @@ import { createRules } from './js/rules.js';
 import { createSettings } from './js/settings.js';
 import { openItemEditor, editorState } from './js/item.js';
 import { recentWorkLabels } from './js/ledger.js';
+import { openAddSheet } from './js/add.js';
+import { takeGrab, openGrabbed } from './js/grab.js';
 
 const TABS = [
   { id: 'today', label: 'Today', icon: 'flame' },
@@ -43,6 +47,7 @@ let leaving = false;
 const pillAmount = h('span', { class: 'pill-amount mono' });
 const pillLabel = h('span', { class: 'pill-label', text: 'Vault' });
 const pill = h('button', { class: 'vault-pill', type: 'button', onclick: () => go('today') }, pillLabel, pillAmount);
+const addButton = h('button', { class: 'add-top', type: 'button', 'aria-label': 'Add to the list', title: 'Add to the list', onclick: () => openAddSheet() }, icon('plus'));
 const datalists = {
   work: h('datalist', { id: 'work-labels' }),
   brands: h('datalist', { id: 'brand-list' }),
@@ -78,6 +83,7 @@ function buildShell() {
       h('nav', { class: 'top-tabs', 'aria-label': 'Sections' }, TABS.map((t) => tabButton(t, 'top'))),
       h('div', { class: 'topbar-end' },
         pill,
+        addButton,
         h('a', { class: 'btn btn-ghost btn-sm top-link', href: '../', target: '_blank', rel: 'noopener' }, 'View site ', icon('external')),
         button('Sign out', { size: 'sm', className: 'top-link', onclick: signOut }),
         menu)));
@@ -118,8 +124,13 @@ function go(tab) {
 }
 
 function route() {
+  const grabbed = takeGrab(); // "#add=…" from the bookmarklet: read once, then gone from the address bar
   const [tab, itemId] = location.hash.slice(1).split('/');
   go(TABS.some((t) => t.id === tab) ? tab : 'today');
+  if (grabbed) {
+    openGrabbed(grabbed); // the editor, filled in; nothing is saved until she says so
+    return;
+  }
   if (itemId && /^[a-z]{1,3}_[a-z0-9_]{1,40}$/.test(itemId) && !editorState()) {
     if (store.state.items.some((i) => i.id === itemId)) openItemEditor(itemId);
     else history.replaceState(null, '', `#${current}`);

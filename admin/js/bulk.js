@@ -102,7 +102,7 @@ export function openBulkImport(initialText = '') {
       fresh.length
         ? h('ol', { class: 'bulk-rows' }, fresh.map((row) => bulkRow(row, rows.indexOf(row), syncCount)))
         : h('p', { class: 'empty-line', text: 'Everything here is already on your list. Greedy, but consistent.' }),
-      repeats.length && h('details', { class: 'bulk-dupes', open: !fresh.length },
+      repeats.length > 0 && h('details', { class: 'bulk-dupes', open: !fresh.length },
         h('summary', { class: 'disclosure' }, h('span', { text: `${plural(repeats.length, 'item')} already on your list` })),
         h('ol', { class: 'bulk-rows' }, repeats.map((row) => bulkRow(row, rows.indexOf(row), syncCount)))));
     const setAll = (checked) => {
@@ -136,7 +136,7 @@ export function openBulkImport(initialText = '') {
           const res = await api('items.import', {
             items: chosen.map((r) => ({
               name: r.name.trim(), brand: r.brand.trim(), variant: r.variant, category: r.category,
-              price: parseAmount(r.priceText) || 0, currency: r.currency, url: r.url, image: r.image, note: r.note, priority: r.priority,
+              price: parseAmount(r.priceText) || 0, currency: r.currency, url: r.url, affiliateUrl: r.affiliateUrl || '', image: r.image, note: r.note, priority: r.priority,
             })),
           });
           added = res.ids || [];
@@ -176,8 +176,10 @@ export function openBulkImport(initialText = '') {
       h('div', { class: 'bulk-fields' },
         nameIn,
         h('div', { class: 'bulk-line' }, brandIn, priceIn, curIn),
-        (meta || row.duplicate) && h('p', { class: 'bulk-meta' },
+        (meta || row.duplicate || row.affiliateUrl) && h('p', { class: 'bulk-meta' },
           row.duplicate && h('span', { class: 'badge badge-warn', text: 'Already on your list' }),
+          // An affiliate or creator link in the list: kept as the item's "Your link", visitors go through it.
+          row.affiliateUrl && h('span', { class: 'badge badge-aff', title: `Your link: ${hostOf(row.affiliateUrl)}` }, icon('tag'), 'Your link'),
           meta && h('span', { text: meta }))));
     return li;
   }

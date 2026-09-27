@@ -28,6 +28,14 @@ function default_settings(): array
         'whip' => true,
         'showLive' => true,
         'showLedger' => true,
+        'affiliate' => [
+            'enabled' => true,
+            'amazon' => [],       // Amazon Associates tag per marketplace, e.g. 'com' => 'yourname-20'
+            'network' => 'none',  // the catch-all for every other shop: 'none', 'skimlinks' or 'sovrn'
+            'networkId' => '',    // Skimlinks publisher ID (123456X1234567) or Sovrn Commerce API key
+            'rules' => [],        // taught per shop: {id, label, domains, mode: 'wrap'|'params', value}
+            'exclude' => [],      // shops that never get an affiliate link, e.g. 'gucci.com'
+        ],
         'copy' => [
             'heroKicker' => 'A self-inflicted financial domination project',
             'heroIntro' => 'You want pretty things. I want you to stop fucking around. Every hour of real work pays tribute into the vault, every lazy hour costs you, and nothing on this list gets bought until it’s earned.',
@@ -43,6 +51,7 @@ function default_settings(): array
             'whipIntro' => 'Catch my sub slacking? Grab the whip and swing it. Hard. Every crack gets counted, and they will hear about it.',
             'footerLine' => 'No work. No treats. No exceptions.',
             'finePrint' => 'A self-inflicted financial domination project: one person, one wishlist, zero free rides. All tribute is paid in hours of real work, logged honestly (mostly).',
+            'affiliateNote' => 'Some links here are affiliate links: if you buy through one, I may earn a small commission. It goes straight into the vault.',
         ],
         'voice' => [
             'taunts' => [
@@ -165,7 +174,7 @@ function default_items(): array
         [$id, $name, $brand, $variant, $category, $price, $currency, $url] = $row;
         return [
             'id' => $id, 'name' => $name, 'brand' => $brand, 'variant' => $variant, 'category' => $category,
-            'price' => $price, 'currency' => $currency, 'url' => $url, 'image' => '', 'imageSource' => '',
+            'price' => $price, 'currency' => $currency, 'url' => $url, 'affiliateUrl' => '', 'image' => '', 'imageSource' => '',
             'priority' => 2, 'note' => '', 'status' => 'wishing', 'createdAt' => $now, 'claimedAt' => null,
         ];
     }, $items);

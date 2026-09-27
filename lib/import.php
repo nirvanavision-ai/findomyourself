@@ -6,7 +6,8 @@
  *   ### Footwear & Accessories                       → category for what follows
  *   5. **Versace Gianni Ribbon Sandals (Red)**        → brand, name, variant
  *   * **Price:** 1.150 € ($1,250 USD)                 → 1150 EUR (the first amount wins)
- *   * **Direct Link:** [Farfetch – …](https://…)      → link (Google wrappers and utm_ tags removed)
+ *   * **Direct Link:** [Farfetch – …](https://…)      → link (Google wrappers and tracking tags removed;
+ *                                                       an affiliate link is kept as her own link)
  *   ---                                               → end of item
  *
  *   Versace Medusa ashtray – 271 € – https://…        one item per line, any separator
@@ -21,6 +22,7 @@ if (realpath($_SERVER['SCRIPT_FILENAME'] ?? '') === __FILE__) {
 }
 
 require_once __DIR__ . '/fetch.php';
+require_once __DIR__ . '/affiliate.php';
 
 const IMPORT_MAX_ITEMS = 200;
 const IMPORT_FIELDS = [
@@ -36,7 +38,7 @@ const IMPORT_FIELDS = [
 const CURRENCY_SYMBOLS = ['€' => 'EUR', '£' => 'GBP', '¥' => 'JPY', '₩' => 'KRW', '₹' => 'INR', '₪' => 'ILS', '$' => 'USD'];
 
 /**
- * Returns a list of ['name','brand','variant','category','price','currency','url','image','note','priority'].
+ * Returns a list of ['name','brand','variant','category','price','currency','url','affiliateUrl','image','note','priority'].
  * $knownBrands adds the brands already on the wishlist to the ones recognized in names.
  */
 function parse_wishlist_text(string $text, array $knownBrands = []): array
@@ -106,7 +108,7 @@ function blank_import_item(string $name, string $category): array
 {
     return [
         'name' => $name, 'brand' => '', 'variant' => '', 'category' => $category, 'price' => null,
-        'currency' => '', 'url' => '', 'image' => '', 'note' => '', 'priority' => 2,
+        'currency' => '', 'url' => '', 'affiliateUrl' => '', 'image' => '', 'note' => '', 'priority' => 2,
     ];
 }
 
@@ -210,9 +212,18 @@ function import_row(array $cells, string $category): array
 
 function finish_import_item(array $item, array $knownBrands): array
 {
+    // A pasted affiliate or creator link (Awin, ShopMy, an Amazon link with a tag…) is kept as her own
+    // link, and the shop link inside it, when it names one, becomes the product link.
+    $found = $item['url'] !== '' ? detect_affiliate_link($item['url']) : null;
+    if ($found && $found['network'] !== 'Short link') {
+        $item['affiliateUrl'] = clean_url($item['url']);
+        if ($found['destination'] !== '') {
+            $item['url'] = $found['destination'];
+        }
+    }
     $name = strip_markdown($item['name']);
-    if ($name === '' && $item['url'] !== '') {
-        $name = name_from_url($item['url']);
+    if ($name === '' && $item['url'] !== '') { // a bare link: "Amazon find" when the link has no words in it
+        $name = name_from_url($item['url']) ?: trim(store_name($item['url']) . ' find');
     }
     // "(White)" at the end is the variant.
     if (preg_match('/^(.+?)\s*\(([^()]{1,60})\)\s*$/u', $name, $m)) {
@@ -224,13 +235,16 @@ function finish_import_item(array $item, array $knownBrands): array
     if ($item['brand'] === '') {
         [$item['brand'], $name] = split_brand($name, $knownBrands);
     }
+    if ($item['brand'] === '' && $item['url'] !== '') { // SSENSE and Net-a-Porter name the designer in the link
+        $item['brand'] = brand_from_url($item['url']);
+    }
     $name = (string)preg_replace("/^(women['’]?s|men['’]?s)\s+/iu", '', $name);
     $item['name'] = clean_text($name, 140);
     $item['brand'] = clean_text($item['brand'], 80);
     $item['variant'] = clean_text($item['variant'], 80);
     $item['category'] = clean_text($item['category'], 60);
     $item['note'] = clean_text($item['note'], 400);
-    $item['url'] = $item['url'] !== '' ? clean_url(normalize_link($item['url'])) : '';
+    $item['url'] = $item['url'] !== '' ? clean_url(canonical_product_url($item['url'])) : '';
     $item['image'] = $item['image'] !== '' ? clean_url(normalize_link($item['image'])) : '';
     $item['currency'] = in_array($item['currency'], CURRENCIES, true) ? $item['currency'] : '';
     return $item;
@@ -238,7 +252,7 @@ function finish_import_item(array $item, array $knownBrands): array
 
 /* ───────────────────────── text helpers ───────────────────────── */
 
-/** URLs in a line: markdown link targets first, then bare links. */
+/** URLs in a line: markdown link targets first, then bare links. Only Google's wrappers come off here. */
 function find_urls(string $text): array
 {
     $urls = [];
@@ -250,7 +264,7 @@ function find_urls(string $text): array
             $urls[] = rtrim($url, '.,;:!?)]*');
         }
     }
-    return array_values(array_unique(array_map('normalize_link', $urls)));
+    return array_values(array_unique(array_map('unwrap_google_link', $urls)));
 }
 
 /** Trims spaces and separators (- – — | : · , ;) from both ends. trim() would cut multibyte characters apart. */

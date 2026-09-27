@@ -1,6 +1,6 @@
 /*
- * FINDOM YOURSELF · Control Room: the Today tab. The vault, the current goal, the focus
- * timer, one-tap commands and fines, money in, and the latest receipts.
+ * FINDOM YOURSELF · Control Room: the Today tab. The vault, the current goal, adding a wish,
+ * the focus timer, one-tap commands and fines, money in, and the latest receipts.
  */
 import {
   h, icon, swap, sig, uid, money, signed, balance, hours, duration, clock, longDay, timeOfDay,
@@ -12,6 +12,7 @@ import {
 } from './ui.js';
 import { receiptRow, openLedgerAll, openLogWork, undoEntry } from './ledger.js';
 import { openItemEditor, openClaimSheet } from './item.js';
+import { addLinkForm, openAddSheet } from './add.js';
 
 const RECENT = 25;
 const STARTED_AGO = [0, 5, 10, 15, 30, 45, 60, 90];
@@ -21,6 +22,11 @@ export function createToday({ go }) {
   const eyebrow = h('p', { class: 'eyebrow' });
   const vault = h('section', { class: 'card vault-card', 'aria-labelledby': 'vault-title' });
   const goal = h('section', { class: 'card goal-card', 'aria-labelledby': 'goal-title' });
+  const addWish = h('section', { class: 'card add-card', 'aria-labelledby': 'add-title' },
+    h('div', { class: 'card-head' },
+      h('h2', { class: 'card-label', id: 'add-title', text: 'Add a wish' }),
+      h('button', { class: 'link-btn', type: 'button', onclick: () => openAddSheet() }, 'More ways ', icon('next'))),
+    addLinkForm({ compact: true }).el);
   const timer = h('section', { class: 'card timer-card', 'aria-labelledby': 'timer-title' });
   const commands = h('section', { class: 'card cmd-card', 'aria-labelledby': 'commands-title' });
   const fines = h('section', { class: 'card cmd-card fines-card', 'aria-labelledby': 'fines-title' });
@@ -29,7 +35,7 @@ export function createToday({ go }) {
   const el = h('section', { class: 'view view-today', id: 'view-today', 'aria-labelledby': 'today-title', hidden: true },
     h('header', { class: 'view-head' }, eyebrow, h('h1', { class: 'view-title', id: 'today-title' }, 'Today’s ', h('em', { text: 'tribute' }))),
     h('div', { class: 'today-grid' },
-      h('div', { class: 'col' }, vault, timer, goal),
+      h('div', { class: 'col' }, vault, timer, goal, addWish),
       h('div', { class: 'col' }, commands, fines, moneyCard, receipts)));
 
   const last = {};
@@ -82,7 +88,7 @@ export function createToday({ go }) {
       swap(goal, headRow(null),
         h('div', { class: 'empty-state' },
           h('p', { class: 'empty-line', text: 'Nothing on the list. Suspicious.' }),
-          button('Add something to want', { kind: 'primary', iconName: 'plus', onclick: () => go('list'), dataset: { key: 'goal-add' } })));
+          button('Add something to want', { kind: 'primary', iconName: 'plus', onclick: () => openAddSheet(), dataset: { key: 'goal-add' } })));
       return;
     }
     const pinned = s.settings.goalId === item.id;

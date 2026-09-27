@@ -3,8 +3,8 @@
  * FINDOM YOURSELF: the data model.
  *
  * data.json holds everything the site knows:
- *   settings  site words, voice lines, hourly rate, currencies, visibility
- *   items     the wishlist, in display order
+ *   settings  site words, voice lines, hourly rate, currencies, visibility, affiliate links
+ *   items     the wishlist, in display order (each with its shop link and, optionally, her own link)
  *   commands  one-tap tasks that pay tribute ("Gym session +$15")
  *   fines     one-tap penalties ("Doomscrolled an hour −$10")
  *   ledger    every tribute, fine and purchase, newest first
@@ -49,8 +49,12 @@ const COPY_FIELDS = [
     'whipIntro' => 320,
     'footerLine' => 120,
     'finePrint' => 600,
+    'affiliateNote' => 300,
 ];
 const VOICE_MOODS = ['taunts', 'working', 'slacking', 'praise', 'unlocked', 'empty'];
+
+// After the constants above: affiliate.php loads fetch.php, which may use them.
+require_once __DIR__ . '/affiliate.php';
 
 /* ───────────────────────── load + save ───────────────────────── */
 
@@ -215,6 +219,7 @@ function normalize_settings(array $in): array
             $out[$key] = (bool)$in[$key];
         }
     }
+    $out['affiliate'] = normalize_affiliate($in['affiliate'] ?? []);
 
     $copy = is_array($in['copy'] ?? null) ? $in['copy'] : [];
     foreach (COPY_FIELDS as $key => $max) {
@@ -265,6 +270,7 @@ function normalize_item($raw, array $settings): ?array
         'price' => max(0.0, min((float)MAX_AMOUNT, money($raw['price'] ?? 0))),
         'currency' => $currency,
         'url' => clean_url($raw['url'] ?? ''),
+        'affiliateUrl' => clean_url($raw['affiliateUrl'] ?? ''), // her own link, kept exactly (its parameters are the point)
         'image' => $image,
         'imageSource' => clean_url($raw['imageSource'] ?? ''),
         'priority' => max(1, min(3, $priority)),
@@ -575,7 +581,11 @@ function public_state(array $data): array
     $views = item_views($data, $stats['balance']);
     $hide = $s['visibility'] === 'hide-amounts';
 
-    $items = array_map(function ($v) use ($hide) {
+    $outbounds = [];
+    $items = array_map(function ($v) use ($hide, $s, &$outbounds) {
+        // Visitors only ever get the link their button opens (the affiliate one when there is one).
+        $link = resolve_outbound($v, $s);
+        $outbounds[] = $link;
         $out = [
             'id' => $v['id'],
             'name' => $v['name'],
@@ -586,8 +596,9 @@ function public_state(array $data): array
             'currency' => $v['currency'],
             'priceBase' => $hide ? null : $v['priceBase'],
             'priceMissing' => $v['priceMissing'],
-            'url' => $v['url'],
-            'store' => store_name($v['url']),
+            'link' => $link['url'],
+            'affiliate' => $link['affiliate'],
+            'store' => item_store($v),
             'image' => $v['image'], // only photos stored here: visitors' browsers never call other sites
             'priority' => $v['priority'],
             'note' => $v['note'],
@@ -631,6 +642,11 @@ function public_state(array $data): array
         $session = ['startedAt' => $data['session']['startedAt'], 'label' => $data['session']['label']];
     }
 
+    // The disclosure shows only while affiliate links are in use; the copy carries the finished text too.
+    $note = affiliate_note($outbounds, $s);
+    $copy = $s['copy'];
+    $copy['affiliateNote'] = $note;
+
     return [
         'settings' => [
             'title' => $s['title'],
@@ -641,7 +657,8 @@ function public_state(array $data): array
             'amountsHidden' => $hide,
             'whip' => $s['whip'],
             'showLedger' => $s['showLedger'],
-            'copy' => $s['copy'],
+            'affiliateNote' => $note,
+            'copy' => $copy,
             'voice' => $s['voice'],
         ],
         'stats' => $stats,
@@ -667,6 +684,9 @@ function store_name(string $url): string
     if ($host === '') {
         return '';
     }
+    if (in_array($host, ['a.co', 'amzn.to', 'amzn.eu', 'amzn.asia'], true)) { // Amazon's short links
+        return 'Amazon';
+    }
     $host = preg_replace('/^(www|shop|store|m|us|uk|eu)\./', '', $host);
     $known = [
         'farfetch' => 'Farfetch', 'amiri' => 'AMIRI', 'ssense' => 'SSENSE', 'net-a-porter' => 'Net-a-Porter',
@@ -680,6 +700,12 @@ function store_name(string $url): string
         'transparentspeaker' => 'Transparent', 'transparent' => 'Transparent', 'hermes' => 'Hermès',
         'louisvuitton' => 'Louis Vuitton', 'dior' => 'Dior', 'chanel' => 'Chanel', 'gucci' => 'Gucci',
         'prada' => 'Prada', 'balenciaga' => 'Balenciaga', 'bottegaveneta' => 'Bottega Veneta', 'ysl' => 'Saint Laurent',
+        'amzn' => 'Amazon', 'ulta' => 'Ulta Beauty', 'shopmy' => 'ShopMy', 'shop-links' => 'ShopMy', 'liketk' => 'LTK',
+        'shopltk' => 'LTK', 'rstyle' => 'LTK', 'geni' => 'Geniuslink', 'howl' => 'Howl', 'bit' => 'Bitly',
+        'tinyurl' => 'TinyURL', 'hm' => 'H&M', 'jcrew' => 'J.Crew', 'bloomingdales' => 'Bloomingdale’s',
+        'macys' => 'Macy’s', 'asos' => 'ASOS', 'nordstromrack' => 'Nordstrom Rack', 'saksoff5th' => 'Saks Off 5th',
+        'modaoperandi' => 'Moda Operandi', 'cettire' => 'Cettire', 'bestbuy' => 'Best Buy', 'miumiu' => 'Miu Miu',
+        'maisonmargiela' => 'Maison Margiela', 'dolcegabbana' => 'Dolce & Gabbana', 'skims' => 'SKIMS',
     ];
     $labels = explode('.', (string)$host);
     $name = count($labels) >= 2 ? $labels[count($labels) - 2] : $labels[0];

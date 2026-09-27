@@ -1,0 +1,131 @@
+/* ==========================================================================
+   Chained up: a locked photo stays in full view under two crossed, glossy
+   black chains and a brass padlock whose ring fills as the vault does.
+   Drawn by js/ui/chains.js from one shared SVG sprite.
+   ========================================================================== */
+
+.chains-sprite { position: absolute; width: 0; height: 0; overflow: hidden; pointer-events: none; }
+
+/* the % under the lock is a counter on this, so it can count up without a JS loop */
+@property --pct { syntax: '<integer>'; inherits: false; initial-value: 0; }
+
+.chains {
+  position: absolute; inset: 0; z-index: 1;
+  pointer-events: none;
+  container: chains / size;
+}
+.chains__straps, .chains__lock {
+  position: absolute; inset: 0;
+  --x: 50%;                                      /* where the chains cross */
+  --y: 60%;
+  --angle: 50deg;
+  --reach: min(100cqw, 125cqh);                  /* how far each half runs from the crossing */
+  --s: clamp(52px, min(24cqw, 30cqh), 140px);    /* the ring around the padlock */
+}
+.chains--lg .chains__straps, .chains--lg .chains__lock { --y: 61%; --s: clamp(92px, min(26cqw, 30cqh), 176px); }
+@container chains (aspect-ratio > .92) { .chains__straps, .chains__lock { --angle: 42deg; } }
+@container chains (aspect-ratio > 1.3) { .chains__straps, .chains__lock { --angle: 29deg; --y: 63%; --s: clamp(52px, 25cqh, 120px); } }
+
+/* ── the chains ── */
+
+.chains__drop { position: absolute; left: var(--x); top: var(--y); width: 0; height: 0; }
+.chains__drop--a { --k: 1; }
+.chains__drop--b { --k: -1; }
+.chains__half {
+  position: absolute; left: 0; top: 0;
+  display: block; width: var(--reach); height: auto;
+  overflow: visible;
+  transform-origin: 0 50%;
+  translate: 0 -50%;
+}
+/* the flipped halves mirror instead of turning over, so the light stays on top */
+.chains__drop[data-half="a1"] .chains__half { rotate: var(--angle); }
+.chains__drop[data-half="a2"] .chains__half { rotate: var(--angle); scale: -1 1; }
+.chains__drop[data-half="b1"] .chains__half { rotate: calc(-1 * var(--angle)); }
+.chains__drop[data-half="b2"] .chains__half { rotate: calc(-1 * var(--angle)); scale: -1 1; }
+
+/* ── the padlock and its ring ── */
+
+.chains__padlock {
+  position: absolute;
+  left: calc(var(--x) - var(--s) * .31); top: calc(var(--y) - var(--s) * .422);
+  width: calc(var(--s) * .62); height: calc(var(--s) * .775);
+  overflow: visible;
+  transform-origin: 50% 16%;                     /* it hangs from the top of the shackle */
+}
+.chains__ring {
+  position: absolute;
+  left: calc(var(--x) - var(--s) / 2); top: calc(var(--y) - var(--s) / 2);
+  width: var(--s); height: var(--s);
+  overflow: visible;
+}
+.chains__track { fill: none; stroke: var(--gold-2); stroke-opacity: .6; stroke-width: 1.6; }
+.chains__arc { fill: none; stroke: var(--latex); stroke-linecap: round; }
+.chains__halo { stroke-width: 9; stroke-opacity: .16; }   /* the glow, without a filter to repaint */
+.chains__fill { stroke-width: 3.8; }
+.chains[data-empty] .chains__arc { opacity: 0; }
+
+.chains__pct {
+  position: absolute; left: var(--x); top: calc(var(--y) + var(--s) * .5 + max(4px, 1.2cqw));
+  translate: -50% 0;
+  min-width: calc(3ch + 1.5em); padding: .5em .75em .42em; border-radius: 99px;
+  font: 600 clamp(10.5px, 3.8cqw, 13px)/1 var(--mono); letter-spacing: .02em; font-variant-numeric: tabular-nums;
+  text-align: center; white-space: nowrap; color: var(--porcelain);
+  background: linear-gradient(180deg, #2a1a21, var(--ink) 70%);
+  box-shadow: inset 0 1px 0 rgba(255, 220, 232, .16), 0 0 0 1px rgba(255, 46, 110, .5), 0 .8cqw 1.8cqw rgba(24, 6, 14, .35);
+  counter-reset: pct var(--pct);
+}
+.chains__pct::before { content: counter(pct) '%'; }
+.chains--lg .chains__pct { font-size: clamp(12.5px, 2.9cqw, 17px); }
+.chains[data-state="unpriced"] .chains__pct { min-width: 0; color: var(--blush); }
+.chains[data-state="unpriced"] .chains__pct::before { content: '?'; }
+
+/* a letter placeholder steps up into the open V above the crossing while it's chained,
+   its brand name on top where the V is widest, so no chain runs through the lettering;
+   once the chains are gone it settles back, fading over the change of layout */
+.card__ph { transition: translate .9s var(--ease-out); }
+:is(.card__media, .modal__media):has(> .chains) .card__ph { translate: 0 -21%; }
+:is(.card__media, .modal__media):has(> .chains) .card__ph .brand { order: -1; }
+.is-unchaining:not(:has(> .chains)) .card__ph { animation: chains-ph .6s var(--ease-out) both; }
+@keyframes chains-ph { from { opacity: .1; } }
+
+/* ── the unlock (js/ui/chains.js snapChains) ── */
+
+.chains__spark {
+  position: absolute; z-index: -1;
+  left: calc(var(--x) - var(--s)); top: calc(var(--y) - var(--s));
+  width: calc(var(--s) * 2); height: calc(var(--s) * 2);
+  border-radius: 50%; opacity: 0;
+  background: radial-gradient(closest-side, rgba(255, 250, 236, .95), rgba(233, 189, 102, .5) 30%, rgba(255, 46, 110, .16) 58%, transparent 80%);
+  mix-blend-mode: screen;
+}
+.is-unchaining .card__stamp { animation: chains-stamp .55s var(--ease-back) .62s both; }
+@keyframes chains-stamp {
+  from { opacity: 0; transform: rotate(7deg) scale(1.8); }
+  to { opacity: 1; transform: rotate(7deg) scale(1); }
+}
+
+/* ── a rattle when the pointer finds a card (desktop, full motion only) ── */
+
+@media (hover: hover) and (pointer: fine) and (prefers-reduced-motion: no-preference) {
+  .card:hover .chains__drop { animation: chains-rattle .75s var(--ease-out) both; }
+  .card:hover .chains__drop--b { animation-delay: .05s; }
+  .card:hover .chains__padlock { animation: chains-swing 1.1s var(--ease-out) both; }
+  .chains.is-snapping .chains__drop, .chains.is-snapping .chains__padlock { animation: none; }
+}
+@keyframes chains-rattle {
+  0% { rotate: 0deg; }
+  18% { rotate: calc(var(--k) * 1.3deg); }
+  40% { rotate: calc(var(--k) * -.9deg); }
+  62% { rotate: calc(var(--k) * .45deg); }
+  82% { rotate: calc(var(--k) * -.15deg); }
+  100% { rotate: 0deg; }
+}
+@keyframes chains-swing {
+  0% { rotate: 0deg; }
+  16% { rotate: 7deg; }
+  38% { rotate: -5deg; }
+  60% { rotate: 2.5deg; }
+  80% { rotate: -1deg; }
+  100% { rotate: 0deg; }
+}

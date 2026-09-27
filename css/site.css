@@ -309,6 +309,15 @@ html.has-cursor :is(input, textarea, select, label) { cursor: auto; }
 .btn--gold { background: var(--gold); border-color: var(--gold); color: var(--ink); }
 .btn--small { min-height: 40px; padding: 0 18px; font-size: .66rem; }
 .btn[disabled] { opacity: .45; pointer-events: none; }
+/* A shop button with its "Affiliate link" caption underneath (the caption leads to the footer's disclosure). */
+.cta { display: inline-flex; flex-direction: column; align-items: center; gap: 2px; max-width: 100%; }
+.btn__caption {
+  padding: 6px 10px; margin-bottom: -6px;
+  font: 600 .6rem/1 var(--sans); font-stretch: 118%; letter-spacing: .2em; text-transform: uppercase;
+  color: var(--muted); text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 4px;
+  transition: color .3s, text-decoration-color .3s;
+}
+.btn__caption:hover { color: var(--latex); text-decoration-color: currentColor; }
 
 .bar { position: relative; height: 4px; border-radius: 4px; background: rgba(255, 220, 232, .1); overflow: hidden; }
 .bar span {
@@ -825,6 +834,7 @@ html.js [data-reveal].is-in { opacity: 1; transform: none; }
   .modal { width: 100vw; height: 100svh; max-height: 100svh; margin: 0; border: 0; border-radius: 0; }
   .modal__grid { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); height: 100%; max-height: none; }
   .modal__media { aspect-ratio: 1 / 1; min-height: 0; max-height: 46svh; }
+  .modal__body { padding-bottom: 76px; } /* the shop button scrolls clear of the ← → buttons */
 }
 
 /* ───────────────────────── trophy wall ───────────────────────── */
@@ -943,6 +953,7 @@ html.gl-ready:not(.no-webgl) .whip__arena { cursor: none; }
 .footer__links { display: flex; gap: 26px; }
 .footer__links a { font: 600 .68rem/1 var(--sans); font-stretch: 118%; letter-spacing: .18em; text-transform: uppercase; text-decoration: none; color: var(--muted); transition: color .3s; }
 .footer__links a:hover { color: var(--latex); }
+.footer__disclosure { margin: 32px 0 0; max-width: 68ch; color: var(--muted); font-size: .82rem; line-height: 1.6; }
 .footer__credit {
   display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px 20px; margin: 44px 0 0;
   font: 600 .62rem/1.4 var(--sans); font-stretch: 118%; letter-spacing: .2em; text-transform: uppercase; color: var(--dim);

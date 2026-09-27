@@ -9,8 +9,11 @@
  *
  *   login             {password}                  sign back in without losing work (header X-Findom-Admin: 1)
  *   item.save         {item}                      create (no id) or update; item.imageUrl also fetches that photo;
- *                                                 item.goal true/false pins/unpins it as the current goal
- *   item.fromLink     {url}                       paste a product link → new item (name, brand, price, photo)
+ *                                                 item.goal true/false pins/unpins it as the current goal;
+ *                                                 item.affiliateUrl is her own link for it ('' clears it)
+ *   item.fromLink     {url, category?}            paste a link from any shop, or an affiliate link → new item
+ *                                                 (name, brand, price, photo); answers affiliate {network, kind}
+ *                                                 when it's kept as her link, and suggestion (see affiliate.learn)
  *   link.inspect      {url}                       what a link tells us, without saving
  *   items.parse       {text}                      preview a pasted list
  *   items.import      {items}                     add the previewed items
@@ -28,7 +31,12 @@
  *   session.start     {label?, minutesAgo?}
  *   session.update    {label?, minutesAgo?}
  *   session.stop      {minutes?, label?, discard?}
- *   settings.save     {settings}                  partial; settings.passcode (plain text) is hashed here
+ *   settings.save     {settings}                  partial; settings.passcode (plain text) is hashed here;
+ *                                                 each part of settings.affiliate that's sent replaces the old one
+ *   affiliate.detect  {url}                       what an affiliate link is, what it would teach, and where
+ *                                                 visitors would go for that shop (preview), without saving
+ *   affiliate.learn   {url}                       teach it one of her links: a rule for that shop, her Amazon
+ *                                                 tag or the catch-all network (answers "applied")
  *   rules.save        {commands?, fines?}
  *   fx.refresh        {}
  *   password.change   {current, next}
@@ -38,11 +46,12 @@ declare(strict_types=1);
 
 require __DIR__ . '/../lib/store.php';
 require __DIR__ . '/../lib/auth.php';
-require __DIR__ . '/../lib/fetch.php';
+require_once __DIR__ . '/../lib/fetch.php'; // store.php loads these two already
+require_once __DIR__ . '/../lib/affiliate.php';
 require __DIR__ . '/../lib/images.php';
 require __DIR__ . '/../lib/import.php';
 
-const EDITABLE_ITEM_FIELDS = ['name', 'brand', 'variant', 'category', 'price', 'currency', 'url', 'priority', 'note'];
+const EDITABLE_ITEM_FIELDS = ['name', 'brand', 'variant', 'category', 'price', 'currency', 'url', 'affiliateUrl', 'priority', 'note'];
 
 send_admin_headers();
 
@@ -99,6 +108,8 @@ $actions = [
     'session.update' => 'act_session_update',
     'session.stop' => 'act_session_stop',
     'settings.save' => 'act_settings_save',
+    'affiliate.detect' => 'act_affiliate_detect',
+    'affiliate.learn' => 'act_affiliate_learn',
     'rules.save' => 'act_rules_save',
     'fx.refresh' => 'act_fx_refresh',
     'password.change' => 'act_password_change',
@@ -120,11 +131,22 @@ function admin_state(array $data): array
     $settings = $data['settings'];
     $settings['hasPasscode'] = $settings['passcodeHash'] !== '';
     unset($settings['passcodeHash']);
+    $settings['affiliate']['amazon'] = (object)$settings['affiliate']['amazon']; // {} rather than [] when empty
+    // Where each item's button takes visitors, and how often they've clicked it.
+    $clicks = load_clicks();
+    $clicksTotal = 0;
+    foreach ($views as &$view) {
+        $view['out'] = resolve_outbound($view, $data['settings']);
+        $view['clicks'] = click_summary($clicks, $view['id'], $data['settings']['timezone']);
+        $clicksTotal += $view['clicks']['total'];
+    }
+    unset($view);
     return [
         'settings' => $settings,
         'stats' => $stats,
         'goalId' => pick_goal($views, $data['settings']),
         'items' => $views,
+        'clicksTotal' => $clicksTotal,
         'commands' => $data['commands'],
         'fines' => $data['fines'],
         'ledger' => array_slice($data['ledger'], 0, 400),
@@ -146,6 +168,8 @@ function server_meta(): array
         'currencies' => CURRENCIES,
         'copyFields' => COPY_FIELDS,
         'voiceMoods' => VOICE_MOODS,
+        'amazonMarketplaces' => amazon_marketplace_names(),
+        'affiliateNetworks' => AFFILIATE_NETWORKS,
         'php' => PHP_VERSION,
     ];
 }
@@ -221,7 +245,7 @@ function set_item_image(string $id, string $path, string $source): void
 
 function url_key(string $url): string
 {
-    $url = normalize_link($url);
+    $url = canonical_product_url($url); // e.g. every way of writing one Amazon product is the same product
     return rtrim((string)preg_replace('#^https?://(www\.)?#i', '', strtolower($url)), '/');
 }
 
@@ -235,6 +259,16 @@ function act_item_save(array $in): array
         if (clean_url($raw['url']) === '') {
             json_fail(400, 'That link doesn’t look right. Paste the full address, starting with https://');
         }
+    }
+    if (array_key_exists('affiliateUrl', $raw)) { // her own link is kept as she made it: only Google's wrapper comes off
+        $mine = is_string($raw['affiliateUrl']) ? trim($raw['affiliateUrl']) : '';
+        if ($mine !== '') {
+            $mine = clean_url(unwrap_google_link($mine));
+            if ($mine === '') {
+                json_fail(400, 'Your link doesn’t look right. Paste the full address, starting with https://');
+            }
+        }
+        $raw['affiliateUrl'] = $mine;
     }
     $imageUrl = clean_url($raw['imageUrl'] ?? '');
     $id = mutate_data(function (array &$data) use ($raw) {
@@ -297,23 +331,53 @@ function act_link_inspect(array $in): array
     return [];
 }
 
-/** The "paste a link" box: the item is created even if the shop refuses to talk to us. */
+/**
+ * The "paste a link" box: a link from any shop, or one of her affiliate links (Awin, ShopMy, Amazon
+ * with her tag…), which is kept as her link while the shop link inside it (or at the end of its
+ * redirects) becomes the item's link. The item is created even if the shop refuses to talk to us.
+ */
 function act_item_from_link(array $in): array
 {
     @set_time_limit(60);
+    $pasted = unwrap_google_link(trim(is_string($in['url'] ?? null) ? $in['url'] : ''));
+    $found = detect_affiliate_link($pasted);
     try {
-        $info = inspect_link((string)($in['url'] ?? ''), wishlist_brands(load_data()));
+        $info = inspect_link($found && $found['destination'] !== '' ? $found['destination'] : $pasted, wishlist_brands(load_data()));
     } catch (RuntimeException $e) {
         fail_on($e, 400);
         return [];
     }
     $data = load_data();
-    foreach ($data['items'] as $item) {
-        if ($item['url'] !== '' && url_key($item['url']) === url_key($info['url'])) {
-            return ['itemId' => $item['id'], 'duplicate' => true, 'info' => $info, 'warnings' => ['That link is already on your list.']];
-        }
+    $affiliate = $data['settings']['affiliate'];
+    $mine = '';
+    if ($found && $found['network'] !== 'Short link' && !affiliate_link_redundant($found, $affiliate)) {
+        $mine = clean_url($pasted);
     }
-    $id = mutate_data(function (array &$data) use ($info, $in) {
+    $learned = learn_affiliate_link($pasted);
+    $suggestion = $learned && affiliate_suggestion_is_new($learned, $affiliate) ? $learned : null;
+    $recognized = $mine !== '' ? ['network' => $found['network'], 'kind' => $found['kind']] : null;
+
+    $pastedKey = clean_url($pasted);
+    foreach ($data['items'] as $item) {
+        $same = ($item['url'] !== '' && url_key($item['url']) === url_key($info['url']))
+            || ($item['affiliateUrl'] !== '' && $item['affiliateUrl'] === $pastedKey);
+        if (!$same) {
+            continue;
+        }
+        if ($mine !== '' && $item['affiliateUrl'] === '') { // her link for something already on the list: attach it
+            mutate_data(function (array &$data) use ($item, $mine) {
+                $index = item_index($data, $item['id']);
+                if ($index !== null && $data['items'][$index]['affiliateUrl'] === '') {
+                    $data['items'][$index]['affiliateUrl'] = $mine;
+                }
+            });
+            return ['itemId' => $item['id'], 'duplicate' => true, 'info' => $info, 'affiliate' => $recognized,
+                'suggestion' => $suggestion, 'warnings' => ['That’s already on your list, so your link was added to it.']];
+        }
+        return ['itemId' => $item['id'], 'duplicate' => true, 'info' => $info, 'affiliate' => null,
+            'suggestion' => $suggestion, 'warnings' => ['That link is already on your list.']];
+    }
+    $id = mutate_data(function (array &$data) use ($info, $in, $mine) {
         if (count($data['items']) >= MAX_ITEMS) {
             json_fail(400, 'The list is full (' . MAX_ITEMS . ' items). Delete a few first.');
         }
@@ -326,6 +390,7 @@ function act_item_from_link(array $in): array
             'price' => $info['price'] ?? 0,
             'currency' => $info['currency'] ?: $data['settings']['baseCurrency'],
             'url' => $info['url'],
+            'affiliateUrl' => $mine,
             'imageSource' => $info['image'],
             'status' => 'wishing',
             'createdAt' => iso_now(),
@@ -349,7 +414,7 @@ function act_item_from_link(array $in): array
     } elseif ($info['found']) {
         $warnings[] = 'No photo found on the page. Paste an image link or upload one.';
     }
-    return ['itemId' => $id, 'info' => $info, 'warnings' => $warnings];
+    return ['itemId' => $id, 'info' => $info, 'affiliate' => $recognized, 'suggestion' => $suggestion, 'warnings' => $warnings];
 }
 
 function act_items_parse(array $in): array
@@ -361,15 +426,20 @@ function act_items_parse(array $in): array
     $data = load_data();
     $items = parse_wishlist_text($text, wishlist_brands($data));
     $urls = [];
+    $mine = [];
     $names = [];
     foreach ($data['items'] as $item) {
         if ($item['url'] !== '') {
             $urls[url_key($item['url'])] = true;
         }
+        if ($item['affiliateUrl'] !== '') {
+            $mine[$item['affiliateUrl']] = true;
+        }
         $names[mb_strtolower($item['brand'] . ' ' . $item['name'])] = true;
     }
     foreach ($items as &$item) {
         $item['duplicate'] = ($item['url'] !== '' && isset($urls[url_key($item['url'])]))
+            || ($item['affiliateUrl'] !== '' && isset($mine[$item['affiliateUrl']]))
             || ($item['url'] === '' && isset($names[mb_strtolower($item['brand'] . ' ' . $item['name'])]));
     }
     unset($item);
@@ -387,7 +457,14 @@ function act_items_import(array $in): array
             }
             $fields = array_intersect_key($raw, array_flip(EDITABLE_ITEM_FIELDS));
             if (isset($fields['url']) && is_string($fields['url'])) {
-                $fields['url'] = normalize_link($fields['url']);
+                $fields['url'] = canonical_product_url($fields['url']);
+            }
+            if (isset($fields['affiliateUrl']) && is_string($fields['affiliateUrl']) && $fields['affiliateUrl'] !== '') {
+                // An affiliate link that does nothing her settings don't already do isn't kept as her link.
+                $found = detect_affiliate_link($fields['affiliateUrl']);
+                if ($found && affiliate_link_redundant($found, $data['settings']['affiliate'])) {
+                    $fields['affiliateUrl'] = '';
+                }
             }
             $item = normalize_item(['id' => new_id('i'), 'status' => 'wishing', 'createdAt' => iso_now(),
                 'imageSource' => clean_url($raw['image'] ?? '')] + $fields, $data['settings']);
@@ -769,6 +846,9 @@ function act_settings_save(array $in): array
         if (is_array($patch['voice'] ?? null)) {
             $next['voice'] = array_merge($s['voice'], $patch['voice']);
         }
+        if (is_array($patch['affiliate'] ?? null)) {
+            $next['affiliate'] = affiliate_patch($s['affiliate'], $patch['affiliate']);
+        }
         if (isset($patch['passcode']) && is_string($patch['passcode']) && $patch['passcode'] !== '') {
             if (($problem = password_problem($patch['passcode'], MIN_PASSCODE_LENGTH)) !== '') {
                 json_fail(400, 'Site passcode: ' . lcfirst($problem));
@@ -794,6 +874,98 @@ function act_settings_save(array $in): array
     });
     grant_view_access(load_data()['settings']); // going private (or a new passcode) keeps this device in
     return [];
+}
+
+/**
+ * The affiliate settings with a patch applied: enabled, amazon, the catch-all (network + networkId),
+ * rules and exclude each replace the old value when sent. IDs she typed wrong are refused with a
+ * hint rather than quietly dropped, so a typo never switches her affiliate links off unnoticed.
+ */
+function affiliate_patch(array $old, array $patch): array
+{
+    $next = $old;
+    foreach (['enabled', 'amazon', 'rules', 'exclude'] as $key) {
+        if (array_key_exists($key, $patch)) {
+            $next[$key] = $patch[$key];
+        }
+    }
+    if (array_key_exists('network', $patch) || array_key_exists('networkId', $patch)) {
+        $next['network'] = is_string($patch['network'] ?? null) ? $patch['network'] : 'none';
+        $next['networkId'] = is_string($patch['networkId'] ?? null) ? trim($patch['networkId']) : '';
+    }
+    foreach (is_array($patch['amazon'] ?? null) ? $patch['amazon'] : [] as $market => $tag) {
+        $tag = is_string($tag) ? trim($tag) : '';
+        if ($tag !== '' && in_array($market, AMAZON_MARKETPLACES, true) && !preg_match(AMAZON_TAG_PATTERN, $tag)) {
+            json_fail(400, '“' . clean_text($tag, 40) . '” doesn’t look like an Amazon tracking ID (for amazon.' . $market . '). It looks like yourname-20.');
+        }
+    }
+    $network = $next['network'];
+    if ($network !== 'none' && normalize_affiliate($next)['network'] !== $network) {
+        $hints = [
+            'skimlinks' => 'It’s your publisher ID, like 123456X1234567 (Skimlinks → Settings → Sites).',
+            'sovrn' => 'It’s your site’s API key: 32 letters and numbers (Sovrn Commerce → Settings → Sites, key icon).',
+        ];
+        if (!isset(AFFILIATE_NETWORKS[$network])) {
+            json_fail(400, 'Choose Skimlinks, Sovrn or Off for the other shops.');
+        }
+        json_fail(400, ($next['networkId'] === '' ? 'Add your ' . AFFILIATE_NETWORKS[$network] . ' ID, or switch it off. '
+            : 'That ' . AFFILIATE_NETWORKS[$network] . ' ID doesn’t look right. ') . $hints[$network]);
+    }
+    $exclude = $patch['exclude'] ?? [];
+    foreach (is_string($exclude) ? (preg_split('/[\s,]+/', $exclude) ?: []) : (is_array($exclude) ? $exclude : []) as $domain) {
+        if (is_string($domain) && trim($domain) !== '' && clean_domain($domain) === '') {
+            json_fail(400, '“' . clean_text($domain, 60) . '” isn’t a shop’s web address. Put one per line, like gucci.com.');
+        }
+    }
+    return $next;
+}
+
+/** What an affiliate link is, what it would teach, and where visitors would go for that shop now. */
+function act_affiliate_detect(array $in): array
+{
+    $url = unwrap_google_link(trim(is_string($in['url'] ?? null) ? $in['url'] : ''));
+    $found = detect_affiliate_link($url);
+    $product = clean_url($found && $found['destination'] !== '' ? $found['destination'] : $url);
+    return [
+        'detected' => $found,
+        'suggestion' => learn_affiliate_link($url),
+        'preview' => resolve_outbound(
+            ['id' => 'preview', 'url' => $product !== '' ? clean_url(canonical_product_url($product)) : '', 'affiliateUrl' => ''],
+            load_data()['settings']
+        ),
+    ];
+}
+
+/** "Teach it a link": one of her affiliate links becomes a rule for its shop, her Amazon tag or the catch-all. */
+function act_affiliate_learn(array $in): array
+{
+    $url = unwrap_google_link(trim(is_string($in['url'] ?? null) ? $in['url'] : ''));
+    $learned = learn_affiliate_link($url);
+    if (!$learned) {
+        $found = detect_affiliate_link($url);
+        if (!$found) {
+            json_fail(400, 'That doesn’t look like an affiliate link. Paste a deep link you made in Awin, Rakuten, CJ, Impact or another network.');
+        }
+        if (in_array($found['kind'], ['creator', 'short'], true)) {
+            json_fail(400, 'That link is made for one product, so there’s no pattern to learn. Paste it into the item’s “Your link” instead.');
+        }
+        if ($found['kind'] === 'amazon') {
+            json_fail(400, 'That Amazon link’s tag doesn’t look like a tracking ID. Add your tag under Amazon Associates instead.');
+        }
+        if ($found['destination'] !== '' && is_amazon_link($found['destination'])) {
+            json_fail(400, 'Amazon only pays through Amazon Associates. Add your Amazon tag instead.');
+        }
+        json_fail(400, 'That link doesn’t say which shop it leads to, so there’s nothing to learn. Make a deep link to a product page and paste that.');
+    }
+    $applied = mutate_data(function (array &$data) use ($learned) {
+        $next = apply_learned_link($data['settings']['affiliate'], $learned);
+        if (count($next['rules']) > MAX_AFFILIATE_RULES) {
+            json_fail(400, 'You already have ' . MAX_AFFILIATE_RULES . ' shop rules. Delete one first.');
+        }
+        $data['settings']['affiliate'] = $next;
+        return learned_label($learned);
+    });
+    return ['applied' => $applied];
 }
 
 function act_rules_save(array $in): array

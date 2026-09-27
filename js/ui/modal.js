@@ -1,6 +1,7 @@
 /*
- * Item details in a <dialog>: photo behind its frost, price, progress, the domme's
- * verdict and the store link. ← → step through the list; #item/<id> links straight here.
+ * Item details in a <dialog>: photo in its chains, price, progress, the domme's
+ * verdict and the store link (her affiliate link when she has one, captioned as such).
+ * ← → step through the list; #item/<id> links straight here.
  */
 import { $, el, clear, svg, icons } from '../lib/dom.js';
 import { getState, subscribe } from '../lib/state.js';
@@ -8,6 +9,7 @@ import { money, hours, shortDate } from '../lib/format.js';
 import { lockScroll } from '../lib/scroll.js';
 import { progressLine } from './lines.js';
 import { sound } from '../audio.js';
+import { chainOverlay, carryChains, introChains } from './chains.js';
 
 let dialog;
 let currentId = null;
@@ -65,7 +67,7 @@ function render(id, fresh) {
   const base = s.settings.baseCurrency;
   const locked = item.status === 'wishing' && !item.affordable;
 
-  const media = el('div', { class: 'modal__media', style: { '--p': item.priceMissing ? 0 : item.progress } });
+  const media = el('div', { class: 'modal__media' });
   if (item.image) {
     const img = el('img', { src: item.image, alt: item.title, referrerpolicy: 'no-referrer' });
     img.addEventListener('error', () => img.remove(), { once: true });
@@ -74,14 +76,12 @@ function render(id, fresh) {
     media.append(el('div', { class: 'card__ph' }, el('span', { class: 'initial', text: (item.brand || item.name).charAt(0) }), el('span', { class: 'brand', text: 'Photo pending' })));
   }
   if (locked) {
-    const frost = el('div', { class: 'card__frost' }, svg(icons.lock));
-    frost.querySelector('svg').classList.add('card__lock');
-    if (fresh) { // the glass slides to its level when the dialog opens
-      frost.style.height = '100%';
-      requestAnimationFrame(() => requestAnimationFrame(() => { frost.style.height = ''; }));
-    }
-    media.append(frost);
+    const chains = chainOverlay({ progress: item.progress, unpriced: item.priceMissing, large: true });
+    media.append(chains);
+    if (fresh) introChains(chains, 350); // the ring fills as the dialog opens
   }
+  // Same item, new data: keep the chains on screen so the ring slides, or snaps off on unlock.
+  if (!fresh) carryChains(dialog.querySelector('.modal__media'), media);
 
   const converted = item.priceBase !== null && item.currency !== base && !item.priceMissing;
   const facts = el('dl', { class: 'modal__facts' },
@@ -92,10 +92,9 @@ function render(id, fresh) {
   );
 
   const actions = el('div', { class: 'modal__actions' });
-  if (item.url) {
-    actions.append(el('a', {
-      class: `btn ${item.affordable ? 'btn--gold' : 'btn--ghost'}`, href: item.url, target: '_blank', rel: 'noopener noreferrer nofollow', 'data-cursor': 'Shop',
-    }, item.affordable ? `Buy it at ${item.store || 'the store'}` : `Look, don’t touch · ${item.store || 'store'}`, svg(icons.arrow)));
+  if (item.link) {
+    actions.append(shopButton(item, { class: `btn ${item.affordable ? 'btn--gold' : 'btn--ghost'}`, 'data-cursor': 'Shop' },
+      item.affordable ? `Buy it at ${item.store || 'the store'}` : `Look, don’t touch · ${item.store || 'store'}`, svg(icons.arrow)));
     actions.querySelector('svg').setAttribute('width', '14');
   }
 
@@ -124,4 +123,25 @@ function render(id, fresh) {
 
 function fact(label, value) {
   return el('div', {}, el('dt', { text: label }), el('dd', { text: value }));
+}
+
+/**
+ * The link out to the shop (her affiliate link when there is one, so it's marked sponsored)
+ * with a small "Affiliate link" caption under it that points at the footer's disclosure.
+ */
+export function shopButton(item, props, ...children) {
+  const link = el('a', {
+    ...props, href: item.link, target: '_blank', 'data-item-link': item.id,
+    rel: item.affiliate ? 'sponsored noopener' : 'noopener noreferrer nofollow',
+  }, ...children);
+  if (!item.affiliate) return link;
+  return el('span', { class: 'cta' }, link,
+    el('a', { class: 'btn__caption', href: '#disclosure', 'aria-label': 'Affiliate link: what that means', on: { click: toDisclosure } }, 'Affiliate link'));
+}
+
+/** Out of the dialog first, so the page can scroll down to the disclosure. */
+function toDisclosure() {
+  if (!dialog?.open) return;
+  dialog.close();
+  lockScroll(false); // now: the close event only arrives after the scroll has started
 }

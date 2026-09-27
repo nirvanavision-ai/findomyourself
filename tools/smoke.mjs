@@ -4,10 +4,10 @@
  *   node tools/smoke.mjs
  *
  * Starts `php -S` on a free port with a throwaway private folder, walks through setup, sign-in,
- * logging tribute, the focus timer, pasting links and lists, claiming, settings, the whip,
- * backups and the security checks, then cleans up. Needs PHP 8.1+ and Node 18+.
- * (Shops can't be reached from sandboxes without internet; the "link → item" check expects
- * the fallback of naming the item from its URL.)
+ * logging tribute, the focus timer, pasting links and lists, affiliate links and click counting,
+ * claiming, settings, the whip, backups and the security checks, then cleans up. Needs PHP 8.1+
+ * and Node 18+. (Shops can't be reached from sandboxes without internet; the "link → item" checks
+ * expect the fallback of naming the item from its URL, and the affiliate checks use .example shops.)
  */
 import fs from 'node:fs';
 import os from 'node:os';
@@ -134,6 +134,111 @@ const ids = s.state.items.map(i => i.id).reverse();
 s = await api('items.reorder', { ids });
 assert(s.ok && s.state.items[0].id === ids[0], 'reorder');
 
+// affiliate links: settings, her own links, pasted affiliate links, teaching it a link, the public buttons
+s = await api('state', null, 'GET');
+assert(s.meta.amazonMarketplaces['co.uk'] === 'amazon.co.uk (UK)' && s.meta.affiliateNetworks.sovrn === 'Sovrn Commerce', 'meta lists Amazon stores and networks');
+assert(JSON.stringify(s.state.settings.affiliate) === '{"enabled":true,"amazon":{},"network":"none","networkId":"","rules":[],"exclude":[]}', 'affiliate links start unset');
+let ash = s.state.items.find(i => i.id === 'i_versace_ashtray');
+assert(ash.out.kind === 'plain' && ash.out.url === ash.url && ash.clicks.total === 0 && s.state.clicksTotal === 0, 'items say where their button goes and how often it was clicked');
+assert(!(await page('/', { cookie: '' })).includes('id="disclosure"'), 'no disclosure while no button is an affiliate link');
+for (const [bad, what] of [[{ network: 'skimlinks', networkId: 'nope' }, 'a bad Skimlinks ID'], [{ network: 'sovrn', networkId: '' }, 'a missing Sovrn key'],
+  [{ network: 'evil', networkId: '123456X1234567' }, 'an unknown network'], [{ amazon: { com: 'bad tag' } }, 'a bad Amazon tag'], [{ exclude: 'gucci.com\nnot-a-shop' }, 'junk on the never list']]) {
+  s = await api('settings.save', { settings: { affiliate: bad } });
+  assert(!s.ok && s.status === 400, 'affiliate settings refuse ' + what + ': ' + s.error);
+}
+s = await api('settings.save', { settings: { affiliate: { network: 'skimlinks', networkId: '123456x1234567', amazon: { com: 'fin-20' }, exclude: ['https://www.amiri.com/'] }, copy: { affiliateNote: 'Some links pay me.' } } });
+let aff = s.state?.settings.affiliate;
+assert(s.ok && aff.network === 'skimlinks' && aff.networkId === '123456X1234567' && aff.amazon.com === 'fin-20' && aff.exclude.join() === 'amiri.com' && s.state.settings.copy.affiliateNote === 'Some links pay me.', 'affiliate settings save');
+s = await api('settings.save', { settings: { affiliate: { enabled: false } } });
+aff = s.state?.settings.affiliate;
+assert(s.ok && aff.enabled === false && aff.network === 'skimlinks' && aff.amazon.com === 'fin-20' && aff.exclude.length === 1, 'a partial affiliate save keeps the rest');
+s = await api('settings.save', { settings: { affiliate: { enabled: true } } });
+ash = s.state.items.find(i => i.id === 'i_versace_ashtray');
+assert(ash.out.kind === 'network' && ash.out.url === 'https://go.skimresources.com/?id=123456X1234567&xs=1&url=' + encodeURIComponent(ash.url) + '&xcust=i_versace_ashtray', 'other shops go through Skimlinks: ' + ash.out.url);
+
+s = await api('item.save', { item: { id: 'i_amiri_hat', affiliateUrl: 'javascript:alert(1)' } });
+assert(!s.ok && s.status === 400, 'her link must be a web link: ' + s.error);
+s = await api('item.save', { item: { id: 'i_amiri_hat', affiliateUrl: 'https://www.google.com/url?q=https%3A%2F%2Fgo.shopmy.us%2Fp-123%3Futm_source%3Dme' } });
+let hat = s.state?.items.find(i => i.id === 'i_amiri_hat');
+assert(s.ok && hat.affiliateUrl === 'https://go.shopmy.us/p-123?utm_source=me' && hat.out.kind === 'mine' && hat.out.label === 'Your link (ShopMy)', 'item.save keeps her link as made (only Google’s wrapper comes off), even for a shop on the never list');
+s = await api('item.save', { item: { id: 'i_amiri_hat', affiliateUrl: '' } });
+hat = s.state?.items.find(i => i.id === 'i_amiri_hat');
+assert(s.ok && hat.affiliateUrl === '' && hat.out.kind === 'plain', 'clearing her link');
+s = await api('item.save', { item: { id: 'i_amiri_hat', affiliateUrl: 'https://go.shopmy.us/p-123?utm_source=me' } });
+
+const awin = 'https://www.awin1.com/cread.php?awinmid=6597&awinaffid=123456&ued=https%3A%2F%2Fwww.silk-scarves.example%2Fproducts%2Fgreen-silk-scarf%3Futm_source%3Dx';
+s = await api('item.fromLink', { url: awin });
+const scarf = s.state?.items.find(i => i.id === s.itemId);
+assert(s.ok && scarf.url === 'https://www.silk-scarves.example/products/green-silk-scarf' && scarf.affiliateUrl === awin && scarf.out.kind === 'mine', 'awin link → item: the shop link inside it, her link kept as pasted (' + scarf?.name + ')');
+assert(s.affiliate?.network === 'Awin' && s.suggestion?.domain === 'silk-scarves.example' && s.suggestion.rule.value === 'https://www.awin1.com/cread.php?awinmid=6597&awinaffid=123456&ued={url}', 'awin link → recognized, with a suggestion to use Awin for that shop');
+s = await api('item.fromLink', { url: awin });
+assert(s.ok && s.duplicate === true && s.itemId === scarf.id, 'the same awin link again → duplicate');
+s = await api('affiliate.detect', { url: awin });
+assert(s.ok && s.detected.network === 'Awin' && s.detected.destination === 'https://www.silk-scarves.example/products/green-silk-scarf?utm_source=x' && s.suggestion.rule && s.preview.kind === 'network', 'affiliate.detect: what the link is, what it would teach, where that shop goes now');
+s = await api('affiliate.learn', { url: awin });
+assert(s.ok && s.applied === 'Awin · silk-scarves.example' && s.state.settings.affiliate.rules.length === 1, 'affiliate.learn adds a rule for the shop');
+s = await api('affiliate.detect', { url: 'https://www.silk-scarves.example/products/red-scarf' });
+assert(s.ok && s.detected === null && s.preview.kind === 'rule' && s.preview.url === 'https://www.awin1.com/cread.php?awinmid=6597&awinaffid=123456&ued=' + encodeURIComponent('https://www.silk-scarves.example/products/red-scarf'), 'that shop’s other links go through the learned rule');
+s = await api('affiliate.learn', { url: 'https://go.shopmy.us/p-1' });
+assert(!s.ok && s.status === 400, 'nothing to learn from a creator link: ' + s.error);
+s = await api('affiliate.detect', { url: 'not a link' });
+assert(s.ok && s.detected === null && s.preview.kind === 'none', 'affiliate.detect stays calm while she types');
+
+s = await api('item.fromLink', { url: 'https://www.amazon.com/Some-Bag/dp/B0TESTTEST?tag=fin-20&ref=x' });
+const bag = s.state?.items.find(i => i.id === s.itemId);
+assert(s.ok && bag.url === 'https://www.amazon.com/dp/B0TESTTEST' && bag.affiliateUrl === '' && s.affiliate === null && bag.out.url === 'https://www.amazon.com/dp/B0TESTTEST?tag=fin-20', 'amazon link with her own tag → short product link, her tag added on the way out');
+s = await api('item.fromLink', { url: 'https://www.amazon.de/dp/B0TESTTES2?tag=fin-21' });
+const deBag = s.state?.items.find(i => i.id === s.itemId);
+assert(s.ok && deBag.affiliateUrl === 'https://www.amazon.de/dp/B0TESTTES2?tag=fin-21' && s.suggestion?.amazon?.de === 'fin-21', 'amazon.de link with a tag she hasn’t saved → kept as her link, with a suggestion to save the tag');
+s = await api('items.parse', { text: 'https://go.shopmy.us/p-123?utm_source=me\n' + awin.replace('green-silk-scarf', 'blue-silk-scarf') });
+assert(s.ok && s.items.length === 2 && s.items[0].duplicate && !s.items[1].duplicate && s.items[1].affiliateUrl.startsWith('https://www.awin1.com/') && s.items[1].url === 'https://www.silk-scarves.example/products/blue-silk-scarf', 'paste parse: her links recognized (and one already on the list)');
+s = await api('items.import', { items: [
+  { name: 'Tagged thing', url: 'https://www.amazon.com/Tagged-Thing/dp/B0TESTTES3?tag=fin-20', affiliateUrl: 'https://www.amazon.com/dp/B0TESTTES3?tag=fin-20' },
+  { name: s.items[1].name, url: s.items[1].url, affiliateUrl: s.items[1].affiliateUrl },
+] });
+const tagged = s.state?.items.find(i => i.name === 'Tagged thing');
+assert(s.ok && s.added === 2 && tagged.url === 'https://www.amazon.com/dp/B0TESTTES3' && tagged.affiliateUrl === '' && s.state.items[1].affiliateUrl.startsWith('https://www.awin1.com/'), 'import: short product links, her own links kept unless they only repeat her Amazon tag');
+
+const pubAff = (await (await fetch(BASE + '/api/state.php')).json()).state;
+const shown = Object.fromEntries(pubAff.items.map(i => [i.id, i]));
+assert(pubAff.items.every(i => !('url' in i) && typeof i.link === 'string' && typeof i.affiliate === 'boolean'), 'public items carry link and affiliate, never url');
+assert(shown.i_amiri_hat.link === 'https://go.shopmy.us/p-123?utm_source=me' && shown.i_amiri_hat.affiliate && shown.i_amiri_hat.store === 'AMIRI', 'public: her own link');
+assert(shown.i_amiri_polo.link === 'https://amiri.com/products/women-womens-ma-quad-knit-short-sleeve-polo-black' && !shown.i_amiri_polo.affiliate, 'public: a shop on the never list stays plain');
+assert(shown.i_versace_ashtray.link.startsWith('https://go.skimresources.com/?id=123456X1234567&xs=1&url=https%3A%2F%2Fwww.farfetch.com%2F') && shown.i_versace_ashtray.affiliate, 'public: other shops through Skimlinks');
+assert(shown[bag.id].link === 'https://www.amazon.com/dp/B0TESTTEST?tag=fin-20' && shown[bag.id].store === 'Amazon', 'public: Amazon with her tag');
+assert(shown[scarf.id].link === awin, 'public: her pasted Awin link');
+assert(pubAff.settings.affiliateNote === 'Some links pay me. As an Amazon Associate I earn from qualifying purchases.' && pubAff.settings.copy.affiliateNote === pubAff.settings.affiliateNote, 'public: disclosure with Amazon’s sentence');
+const affPage = await page('/', { cookie: '' });
+assert(affPage.includes('id="disclosure"') && affPage.includes('As an Amazon Associate') && affPage.includes('rel="sponsored noopener"'), 'the page shows the disclosure and marks affiliate links');
+
+// clicks on shop buttons
+const phoneUA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1';
+async function click(id, { headers = { 'X-Findom': '1' }, jar = { cookie: '' }, agent = phoneUA } = {}) {
+  const res = await req('/api/click.php', { method: 'POST', headers: { 'Content-Type': 'application/json', 'User-Agent': agent, ...headers }, body: JSON.stringify({ id }) }, jar);
+  return { status: res.status, cache: res.headers.get('cache-control') || '', cookies: res.headers.getSetCookie(), ...(await res.json().catch(() => ({}))) };
+}
+let c = await click('i_amiri_hat', { headers: {} });
+assert(c.status === 403, 'click without the header refused');
+assert((await req('/api/click.php')).status === 405, 'click by GET refused');
+c = await click('i_amiri_hat');
+assert(c.status === 200 && c.ok && c.counted === true && /no-store/.test(c.cache) && c.cookies.length === 0, 'click counts, sets no cookie');
+c = await click('i_amiri_hat');
+assert(c.ok && c.counted === false, 'the same visitor, item and day counts once');
+c = await click('i_versace_ashtray', { agent: 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)' });
+assert(c.ok && c.counted === false, 'bots aren’t counted');
+c = await click('i_nope');
+assert(c.status === 404 && c.ok === false, 'unknown item: 404');
+c = await click({ id: 'i_amiri_hat' });
+assert(c.status === 404, 'junk id: 404');
+await api('item.save', { item: { id: 'i_amiri_polo', status: 'archived' } });
+c = await click('i_amiri_polo');
+assert(c.status === 404, 'archived item: 404');
+await api('item.save', { item: { id: 'i_amiri_polo', status: 'wishing' } });
+s = await api('state', null, 'GET');
+hat = s.state.items.find(i => i.id === 'i_amiri_hat');
+assert(hat.clicks.total === 1 && hat.clicks.week === 1 && hat.clicks.last && s.state.clicksTotal === 1, 'the Control Room sees the click');
+assert(!fs.readFileSync(PRIV + '/clicks.json', 'utf8').includes('127.0.0.1'), 'no address stored with clicks');
+
 s = await api('settings.save', { settings: { hourlyRate: 40, copy: { heroKicker: 'Test kicker' }, voice: { praise: ['Good.'] } } });
 assert(s.ok && s.state.settings.hourlyRate === 40 && s.state.settings.copy.heroKicker === 'Test kicker' && s.state.settings.voice.praise.length === 1, 'settings save');
 s = await api('settings.save', { settings: { visibility: 'private' } });
@@ -144,6 +249,8 @@ s = await api('settings.save', { settings: { visibility: 'private', passcode: 'k
 assert(s.ok && s.state.settings.visibility === 'private' && s.state.settings.hasPasscode, 'private with passcode');
 let pr = await fetch(BASE + '/api/state.php');
 assert(pr.status === 401 && /no-store/.test(pr.headers.get('cache-control')), 'public state locked when private');
+c = await click('i_amiri_skirt');
+assert(c.status === 401, 'clicks locked when private');
 const visitor = { cookie: '' };
 const gate = await req('/', {}, visitor);
 const gateHtml = await gate.text();
@@ -156,6 +263,8 @@ r = await post('/', { csrf: formToken(gateHtml), passcode: 'kneel-before-me' }, 
 assert(r.status === 303 && visitor.cookie.includes('findom_view='), 'right passcode lets the visitor in');
 pr = await req('/api/state.php', {}, visitor);
 assert(pr.status === 200 && /private/.test(pr.headers.get('cache-control')), 'visitor cookie opens the state API, privately cached');
+c = await click('i_amiri_skirt', { jar: visitor });
+assert(c.ok && c.counted === true, 'a visitor with the passcode can click');
 s = await api('settings.save', { settings: { visibility: 'hide-amounts' } });
 const hidden = await (await fetch(BASE + '/api/state.php')).json();
 assert(hidden.state.stats.balance === null && hidden.state.items[0].price === null, 'hide-amounts hides money');
